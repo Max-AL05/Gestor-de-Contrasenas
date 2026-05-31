@@ -28,7 +28,6 @@ module PasswordGenerator
   end
 end
 
-
 module Crypto
   ITERATIONS = 100_000
   KEY_LENGTH = 32
@@ -93,6 +92,7 @@ module Crypto
   end
 end
 
+
 class PasswordManager
   VAULT_FILE      = 'vault.json'
   MIN_MASTER_LEN  = 8
@@ -117,16 +117,14 @@ class PasswordManager
     end
   end
 
-
   private
 
   def authenticate
-    @master_password = prompt_secret("  Contraseña maestra")
+    @master_password = prompt_secret("🔑  Contraseña maestra")
     if @master_password.empty?
-      abort "\n    La contraseña maestra no puede estar vacía."
+      abort "\n  ❌  La contraseña maestra no puede estar vacía."
     end
   end
-
 
   def load_vault
     unless File.exist?(VAULT_FILE)
@@ -135,7 +133,7 @@ class PasswordManager
       return
     end
 
-    print "\n    Derivando clave y descifrando almacén..."
+    print "\n  ⏳  Derivando clave y descifrando almacén..."
     $stdout.flush
 
     begin
@@ -145,11 +143,11 @@ class PasswordManager
       print "\r" + (" " * 55) + "\r"
       ok "Almacén cargado — #{@entries.size} #{pluralize(@entries.size, 'entrada', 'entradas')}."
     rescue OpenSSL::Cipher::CipherError
-      abort "\n\n    Contraseña maestra incorrecta o el archivo ha sido alterado."
+      abort "\n\n  ❌  Contraseña maestra incorrecta o el archivo ha sido alterado."
     rescue JSON::ParserError
-      abort "\n    El archivo del almacén está dañado y no puede leerse."
+      abort "\n  ❌  El archivo del almacén está dañado y no puede leerse."
     rescue Errno::EACCES => e
-      abort "\n    Sin permisos para leer '#{VAULT_FILE}': #{e.message}"
+      abort "\n  ❌  Sin permisos para leer '#{VAULT_FILE}': #{e.message}"
     end
   end
 
@@ -166,35 +164,25 @@ class PasswordManager
   def dispatch(option)
     clear_screen
     case option
-    when '1' then cmd_list
-    when '2' then cmd_show
-    when '3' then cmd_add_manual
-    when '4' then cmd_add_generated
-    when '5' then cmd_delete
-    when '6' then cmd_change_master
+    when '1' then cmd_browse
+    when '2' then cmd_add
+    when '3' then cmd_delete
+    when '4' then cmd_change_master
     when '0' then cmd_exit
     else
-      err "Opción '#{option}' no válida. Elige entre 0 y 6."
+      err "Opción '#{option}' no válida. Elige entre 0 y 4."
     end
   end
 
-  # ── Opción 1: Listar todos los servicios ────────────────────────
 
-  def cmd_list
-    puts "  ── Lista de servicios almacenados ──────────────────────"
+  # ── Opción 1: Ver servicios y detalle de una entrada ────────────
+
+  def cmd_browse
+    puts "  ── Servicios almacenados ───────────────────────────────"
     print_entries_table
-    pause
-  end
+    return pause if @entries.empty?
 
-  # ── Opción 2: Ver una entrada concreta ──────────────────────────
-
-  def cmd_show
-    return empty_vault_notice if @entries.empty?
-
-    puts "  ── Ver entrada ─────────────────────────────────────────"
-    print_entries_table
-
-    idx = prompt_index("ver")
+    idx = prompt_index("ver detalle de")
     return unless idx
 
     e   = @entries[idx]
@@ -208,10 +196,10 @@ class PasswordManager
     pause
   end
 
-  # ── Opción 3: Añadir entrada manualmente ────────────────────────
 
-  def cmd_add_manual
-    puts "  ── Añadir entrada manual ───────────────────────────────"
+  # ── Opción 2: Añadir entrada (manual o con contraseña generada) ─
+  def cmd_add
+    puts "  ── Añadir nueva entrada ────────────────────────────────"
 
     service  = prompt_required("Servicio")
     return unless service
@@ -227,30 +215,8 @@ class PasswordManager
     pause
   end
 
-  # ── Opción 4: Generar contraseña y añadir entrada ───────────────
 
-  def cmd_add_generated
-    puts "  ── Añadir con contraseña generada ─────────────────────"
-
-    service  = prompt_required("Servicio")
-    return unless service
-
-    username = prompt_required("Usuario")
-    return unless username
-
-    length   = prompt_length
-    password = PasswordGenerator.generate(length)
-
-    puts "\n    Contraseña generada: \e[1;33m#{password}\e[0m"
-    puts "      Longitud: #{password.length} caracteres | " \
-         "Mayúsc., minúsc., dígitos y símbolos incluidos"
-
-    append_and_save(service, username, password)
-    ok "Entrada añadida y almacén guardado."
-    pause
-  end
-
-  # ── Opción 5: Eliminar una entrada por índice ───────────────────
+  # ── Opción 3: Eliminar una entrada por índice ───────────────────
 
   def cmd_delete
     return empty_vault_notice if @entries.empty?
@@ -262,7 +228,7 @@ class PasswordManager
     return unless idx
 
     e = @entries[idx]
-    print "\n     ¿Eliminar '#{e['service']}' (#{e['username']})? "
+    print "\n  ⚠️   ¿Eliminar '#{e['service']}' (#{e['username']})? "
     print "Esta acción es irreversible. (s/N): "
     input = gets.chomp.strip.downcase
 
@@ -276,10 +242,12 @@ class PasswordManager
     pause
   end
 
-  # ── Opción 6: Cambiar contraseña maestra ────────────────────────
+
+  # ── Opción 4: Cambiar contraseña maestra ────────────────────────
 
   def cmd_change_master
     puts "  ── Cambiar contraseña maestra ──────────────────────────"
+
     if File.exist?(VAULT_FILE)
       current = prompt_secret("Contraseña maestra actual")
       begin
@@ -313,11 +281,11 @@ class PasswordManager
   end
 
 
-  # ── Opción 0: Salir del programa ─────────────────────────────────
+  # ── Opción 0: Salir del programa ────────────────────────────────
 
   def cmd_exit
     @master_password&.replace("\x00" * @master_password.bytesize)
-    puts "\n    ¡Hasta pronto! Tu almacén está protegido."
+    puts "\n  👋  ¡Hasta pronto! Tu almacén está protegido."
     exit(0)
   end
 
@@ -352,7 +320,7 @@ class PasswordManager
 
     length   = prompt_length
     password = PasswordGenerator.generate(length)
-    puts "    Contraseña generada: \e[1;33m#{password}\e[0m"
+    puts "  🔐  Contraseña generada: \e[1;33m#{password}\e[0m"
     password
   end
 
@@ -392,7 +360,6 @@ class PasswordManager
     idx
   end
 
-
   def print_entries_table
     sep = '─' * 60
 
@@ -428,10 +395,9 @@ class PasswordManager
   end
 
   def empty_vault_notice
-    info "El almacén está vacío. Añade entradas con las opciones 3 ó 4."
+    info "El almacén está vacío. Añade entradas con la opción 2."
     pause
   end
-
 
   def info(msg)
     puts "\n  ℹ️   #{msg}"
@@ -462,14 +428,11 @@ class PasswordManager
     system('clear') || system('cls')
   end
 
-
-  # ── Interfaz visual ──────────────────────────────────────────────
-
   def show_banner
     puts <<~BANNER
 
       ╔═══════════════════════════════════════════════════════╗
-      ║         GESTOR DE CONTRASEÑAS SEGURAS                 ║
+      ║             GESTOR DE CONTRASEÑAS SEGURAS             ║
       ║                                                       ║
       ║  Cifrado    : AES-256-GCM (cifrado autenticado)       ║
       ║  KDF        : PBKDF2-HMAC-SHA256 · 100 000 iter.      ║
@@ -485,12 +448,10 @@ class PasswordManager
       ┌─────────────────────────────────────────────────┐
       │                MENÚ PRINCIPAL                   │
       ├─────────────────────────────────────────────────┤
-      │  1. Listar todos los servicios                  │
-      │  2. Ver entrada  (usuario y contraseña)         │
-      │  3. Añadir entrada manualmente                  │
-      │  4. Añadir con contraseña generada              │
-      │  5. Eliminar entrada                            │
-      │  6. Cambiar contraseña maestra                  │
+      │  1. Ver entradas                                │
+      │  2. Añadir entrada                              │
+      │  3. Eliminar entrada                            │
+      │  4. Cambiar contraseña maestra                  │
       │  0. Salir                                       │
       └─────────────────────────────────────────────────┘
     MENU
@@ -501,10 +462,10 @@ end
 begin
   PasswordManager.new.run
 rescue Interrupt
-  puts "\n\n     Programa interrumpido. ¡Hasta pronto!"
+  puts "\n\n  ⚠️   Programa interrumpido. ¡Hasta pronto!"
   exit(0)
 rescue => e
-  puts "\n    Error inesperado: #{e.message}"
+  puts "\n  ❌  Error inesperado: #{e.message}"
   puts e.backtrace.first(5).map { |l| "     #{l}" }.join("\n") if $DEBUG
   exit(1)
 end
