@@ -1,3 +1,4 @@
+# Almacén cifrado (NUNCA subir a GitHub)
 vault.json
 
 # Archivos del sistema
@@ -19,4 +20,3 @@ vault.json
 
 # Dependencias (si usas Bundler)
 Gemfile.lock
-EOF
