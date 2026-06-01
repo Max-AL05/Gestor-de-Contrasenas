@@ -120,9 +120,9 @@ class PasswordManager
   private
 
   def authenticate
-    @master_password = prompt_secret("🔑  Contraseña maestra")
+    @master_password = prompt_secret("⚪  Contraseña maestra")
     if @master_password.empty?
-      abort "\n  ❌  La contraseña maestra no puede estar vacía."
+      abort "\n    La contraseña maestra no puede estar vacía."
     end
   end
 
@@ -133,7 +133,7 @@ class PasswordManager
       return
     end
 
-    print "\n  ⏳  Derivando clave y descifrando almacén..."
+    print "\n    Derivando clave y descifrando almacén..."
     $stdout.flush
 
     begin
@@ -143,11 +143,11 @@ class PasswordManager
       print "\r" + (" " * 55) + "\r"
       ok "Almacén cargado — #{@entries.size} #{pluralize(@entries.size, 'entrada', 'entradas')}."
     rescue OpenSSL::Cipher::CipherError
-      abort "\n\n  ❌  Contraseña maestra incorrecta o el archivo ha sido alterado."
+      abort "\n\n    Contraseña maestra incorrecta o el archivo ha sido alterado."
     rescue JSON::ParserError
-      abort "\n  ❌  El archivo del almacén está dañado y no puede leerse."
+      abort "\n    El archivo del almacén está dañado y no puede leerse."
     rescue Errno::EACCES => e
-      abort "\n  ❌  Sin permisos para leer '#{VAULT_FILE}': #{e.message}"
+      abort "\n    Sin permisos para leer '#{VAULT_FILE}': #{e.message}"
     end
   end
 
@@ -228,7 +228,7 @@ class PasswordManager
     return unless idx
 
     e = @entries[idx]
-    print "\n  ⚠️   ¿Eliminar '#{e['service']}' (#{e['username']})? "
+    print "\n     ¿Eliminar '#{e['service']}' (#{e['username']})? "
     print "Esta acción es irreversible. (s/N): "
     input = gets.chomp.strip.downcase
 
@@ -285,7 +285,7 @@ class PasswordManager
 
   def cmd_exit
     @master_password&.replace("\x00" * @master_password.bytesize)
-    puts "\n  👋  ¡Hasta pronto! Tu almacén está protegido."
+    puts "\n  ⚪  ¡Hasta pronto! Tu almacén está protegido."
     exit(0)
   end
 
@@ -320,7 +320,7 @@ class PasswordManager
 
     length   = prompt_length
     password = PasswordGenerator.generate(length)
-    puts "  🔐  Contraseña generada: \e[1;33m#{password}\e[0m"
+    puts "    Contraseña generada: \e[1;33m#{password}\e[0m"
     password
   end
 
@@ -400,19 +400,19 @@ class PasswordManager
   end
 
   def info(msg)
-    puts "\n  ℹ️   #{msg}"
+    puts "\n  🔵   #{msg}"
   end
 
   def ok(msg)
-    puts "\n  ✅  #{msg}"
+    puts "\n  🟢  #{msg}"
   end
 
   def err(msg)
-    puts "\n  ❌  #{msg}"
+    puts "\n  🔴  #{msg}"
   end
 
   def warn_msg(msg)
-    puts "\n  ⚠️   #{msg}"
+    puts "\n  🟡   #{msg}"
   end
 
   def pluralize(n, singular, plural)
@@ -434,10 +434,10 @@ class PasswordManager
       ╔═══════════════════════════════════════════════════════╗
       ║             GESTOR DE CONTRASEÑAS SEGURAS             ║
       ║                                                       ║
-      ║  Cifrado    : AES-256-GCM (cifrado autenticado)       ║
+      ║  Cifrado    : AES-256-GCM                             ║
       ║  KDF        : PBKDF2-HMAC-SHA256 · 100 000 iter.      ║
       ║  Almacén    : #{VAULT_FILE.ljust(39)} ║
-      ║  Permisos   : 0600 (solo el propietario)              ║
+      ║  Permisos   : 0600                                    ║
       ╚═══════════════════════════════════════════════════════╝
     BANNER
   end
@@ -462,10 +462,10 @@ end
 begin
   PasswordManager.new.run
 rescue Interrupt
-  puts "\n\n  ⚠️   Programa interrumpido. ¡Hasta pronto!"
+  puts "\n\n  🟡   Programa interrumpido. ¡Hasta pronto!"
   exit(0)
 rescue => e
-  puts "\n  ❌  Error inesperado: #{e.message}"
+  puts "\n  🔴  Error inesperado: #{e.message}"
   puts e.backtrace.first(5).map { |l| "     #{l}" }.join("\n") if $DEBUG
   exit(1)
 end

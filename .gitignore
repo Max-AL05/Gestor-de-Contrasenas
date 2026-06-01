@@ -1,0 +1,22 @@
+vault.json
+
+# Archivos del sistema
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# Archivos de editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Dependencias (si usas Bundler)
+Gemfile.lock
+EOF
