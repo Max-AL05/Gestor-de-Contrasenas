@@ -166,14 +166,14 @@ class PasswordManager
     case option
     when '1' then cmd_browse
     when '2' then cmd_add
-    when '3' then cmd_delete
-    when '4' then cmd_change_master
+    when '3' then cmd_edit
+    when '4' then cmd_delete
+    when '5' then cmd_change_master
     when '0' then cmd_exit
     else
-      err "Opción '#{option}' no válida. Elige entre 0 y 4."
+      err "Opción '#{option}' no válida. Elige entre 0 y 5."
     end
   end
-
 
   # ── Opción 1: Ver servicios y detalle de una entrada ────────────
 
@@ -196,8 +196,8 @@ class PasswordManager
     pause
   end
 
-
   # ── Opción 2: Añadir entrada (manual o con contraseña generada) ─
+
   def cmd_add
     puts "  ── Añadir nueva entrada ────────────────────────────────"
 
@@ -215,8 +215,76 @@ class PasswordManager
     pause
   end
 
+  # ── Opción 3: Editar una entrada existente ──────────────────────
 
-  # ── Opción 3: Eliminar una entrada por índice ───────────────────
+  def cmd_edit
+    return empty_vault_notice if @entries.empty?
+
+    puts "  ── Editar entrada ──────────────────────────────────────"
+    print_entries_table
+
+    idx = prompt_index("editar")
+    return unless idx
+
+    e = @entries[idx]
+
+    puts "\n  Deja en blanco y pulsa Enter para conservar el valor actual.\n"
+
+    print "  Servicio    [#{e['service']}]: "
+    input_svc = gets.chomp.strip
+    new_svc   = input_svc.empty? ? e['service'] : input_svc
+
+    print "  Usuario     [#{e['username']}]: "
+    input_usr = gets.chomp.strip
+    new_usr   = input_usr.empty? ? e['username'] : input_usr
+
+    puts "  Contraseña  [Enter para conservar | 'g' para generar nueva]:"
+    print "  > "
+    input_pwd = gets.chomp.strip
+
+    new_pwd = case input_pwd
+              when ''
+                e['password']
+              when 'g', 'G'
+                length  = prompt_length
+                generated = PasswordGenerator.generate(length)
+                puts "  Contraseña generada: \e[1;33m#{generated}\e[0m"
+                generated
+              else
+                input_pwd
+              end
+
+    puts
+    puts "  ── Resumen de cambios ──────────────────────────────────"
+    puts "  Servicio  : #{e['service']}  →  #{new_svc}"   if new_svc != e['service']
+    puts "  Usuario   : #{e['username']}  →  #{new_usr}"  if new_usr != e['username']
+    puts "  Contraseña: [cambiada]"                        if new_pwd != e['password']
+
+    if new_svc == e['service'] && new_usr == e['username'] && new_pwd == e['password']
+      info "No se realizó ningún cambio."
+      pause
+      return
+    end
+
+    print "\n  ¿Guardar los cambios? (s/N): "
+    confirm = gets.chomp.strip.downcase
+
+    unless confirm == 's'
+      info "Edición cancelada. No se guardó nada."
+      pause
+      return
+    end
+
+    @entries[idx]['service']  = new_svc
+    @entries[idx]['username'] = new_usr
+    @entries[idx]['password'] = new_pwd
+    save_vault
+
+    ok "Entrada actualizada y almacén guardado."
+    pause
+  end
+
+  # ── Opción 4: Eliminar una entrada por índice ───────────────────
 
   def cmd_delete
     return empty_vault_notice if @entries.empty?
@@ -243,7 +311,7 @@ class PasswordManager
   end
 
 
-  # ── Opción 4: Cambiar contraseña maestra ────────────────────────
+  # ── Opción 5: Cambiar contraseña maestra ────────────────────────
 
   def cmd_change_master
     puts "  ── Cambiar contraseña maestra ──────────────────────────"
@@ -289,6 +357,8 @@ class PasswordManager
     exit(0)
   end
 
+
+  # ── Helpers de entrada de usuario ───────────────────────────────
 
   def prompt_secret(label)
     print "\n  #{label}: "
@@ -359,6 +429,8 @@ class PasswordManager
 
     idx
   end
+
+  # ── Helpers de presentación ──────────────────────────────────────
 
   def print_entries_table
     sep = '─' * 60
@@ -450,8 +522,9 @@ class PasswordManager
       ├─────────────────────────────────────────────────┤
       │  1. Ver entradas                                │
       │  2. Añadir entrada                              │
-      │  3. Eliminar entrada                            │
-      │  4. Cambiar contraseña maestra                  │
+      │  3. Editar entrada                              │
+      │  4. Eliminar entrada                            │
+      │  5. Cambiar contraseña maestra                  │
       │  0. Salir                                       │
       └─────────────────────────────────────────────────┘
     MENU
