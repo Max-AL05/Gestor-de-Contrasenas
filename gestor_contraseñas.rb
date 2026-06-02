@@ -1,3 +1,6 @@
+# encoding: utf-8
+# frozen_string_literal: true
+
 require 'securerandom'
 require 'openssl'
 require 'json'
@@ -140,6 +143,7 @@ class PasswordManager
       encrypted_data = JSON.parse(File.read(VAULT_FILE))
       plaintext      = Crypto.decrypt(encrypted_data, @master_password)
       @entries       = JSON.parse(plaintext)
+      sort_entries!
       print "\r" + (" " * 55) + "\r"
       ok "Almacén cargado — #{@entries.size} #{pluralize(@entries.size, 'entrada', 'entradas')}."
     rescue OpenSSL::Cipher::CipherError
@@ -198,12 +202,20 @@ class PasswordManager
     pause
   end
 
+
+  # ── Opción 2: Buscar y filtrar entradas ─────────────────────────
+  # Búsqueda parcial, sin distinción de mayúsculas, en servicio Y usuario.
+  # Los términos que coincidan aparecen resaltados en cian.
+  # Desde los resultados se puede ver el detalle de una entrada.
+  # Al final se ofrece repetir la búsqueda sin volver al menú.
+
   def cmd_search
     return empty_vault_notice if @entries.empty?
 
     loop do
       puts "  ── Buscar entradas ─────────────────────────────────────"
       puts "  Campos: servicio y usuario · sin distinción de mayúsculas"
+      puts "  Consejo: escribe parte del nombre (p.ej. 'git', 'gmail')."
       puts "  Enter sin texto vuelve al menú.\n"
 
       print "\n  🔍 Buscar: "
@@ -215,6 +227,7 @@ class PasswordManager
         return
       end
 
+      # Filtrar manteniendo el índice original de @entries
       results = @entries.each_with_index.select { |e, _i| entry_matches?(e, query) }
 
       clear_screen
@@ -228,6 +241,7 @@ class PasswordManager
         puts "  ── #{results_str} para \"#{query}\" (de #{total_str}) ──"
         print_search_table(results, query)
 
+        # Ofrecer ver detalle de uno de los resultados
         idx = prompt_result_index(results)
         if idx
           e   = @entries[idx]
@@ -249,6 +263,9 @@ class PasswordManager
     pause
   end
 
+
+  # ── Opción 3: Añadir entrada (manual o con contraseña generada) ─
+
   def cmd_add
     puts "  ── Añadir nueva entrada ────────────────────────────────"
 
@@ -266,6 +283,12 @@ class PasswordManager
     pause
   end
 
+
+  # ── Opción 4: Editar una entrada existente ──────────────────────
+  # Muestra los valores actuales entre corchetes.
+  # Pulsar Enter sin escribir nada conserva el valor original,
+  # lo que permite editar solo los campos que necesites.
+
   def cmd_edit
     return empty_vault_notice if @entries.empty?
 
@@ -279,36 +302,44 @@ class PasswordManager
 
     puts "\n  Deja en blanco y pulsa Enter para conservar el valor actual.\n"
 
+    # ── Servicio ────────────────────────────────────────────────
     print "  Servicio    [#{e['service']}]: "
     input_svc = gets.chomp.strip
     new_svc   = input_svc.empty? ? e['service'] : input_svc
 
+    # ── Usuario ─────────────────────────────────────────────────
     print "  Usuario     [#{e['username']}]: "
     input_usr = gets.chomp.strip
     new_usr   = input_usr.empty? ? e['username'] : input_usr
 
+    # ── Contraseña ──────────────────────────────────────────────
     puts "  Contraseña  [actual oculta — Enter para conservar | 'g' para generar nueva]:"
     print "  > "
     input_pwd = gets.chomp.strip
 
     new_pwd = case input_pwd
               when ''
+                # Conservar la contraseña actual sin mostrarla
                 e['password']
               when 'g', 'G'
+                # Generar una nueva contraseña aleatoria
                 length  = prompt_length
                 generated = PasswordGenerator.generate(length)
                 puts "  Contraseña generada: \e[1;33m#{generated}\e[0m"
                 generated
               else
+                # Usar la contraseña escrita manualmente
                 input_pwd
               end
 
+    # ── Confirmar cambios ───────────────────────────────────────
     puts
     puts "  ── Resumen de cambios ──────────────────────────────────"
     puts "  Servicio  : #{e['service']}  →  #{new_svc}"   if new_svc != e['service']
     puts "  Usuario   : #{e['username']}  →  #{new_usr}"  if new_usr != e['username']
     puts "  Contraseña: [cambiada]"                        if new_pwd != e['password']
 
+    # Si no hubo ningún cambio real, avisamos y salimos
     if new_svc == e['service'] && new_usr == e['username'] && new_pwd == e['password']
       info "No se realizó ningún cambio."
       pause
@@ -324,14 +355,19 @@ class PasswordManager
       return
     end
 
+    # Aplicar los cambios y persistir
     @entries[idx]['service']  = new_svc
     @entries[idx]['username'] = new_usr
     @entries[idx]['password'] = new_pwd
+    sort_entries!
     save_vault
 
     ok "Entrada actualizada y almacén guardado."
     pause
   end
+
+
+  # ── Opción 5: Eliminar una entrada por índice ───────────────────
 
   def cmd_delete
     return empty_vault_notice if @entries.empty?
@@ -356,6 +392,9 @@ class PasswordManager
     end
     pause
   end
+
+
+  # ── Opción 6: Cambiar contraseña maestra ────────────────────────
 
   def cmd_change_master
     puts "  ── Cambiar contraseña maestra ──────────────────────────"
@@ -392,6 +431,7 @@ class PasswordManager
     pause
   end
 
+
   # ── Opción 0: Salir del programa ────────────────────────────────
 
   def cmd_exit
@@ -399,6 +439,9 @@ class PasswordManager
     puts "\n  ⚪  ¡Hasta pronto! Tu almacén está protegido."
     exit(0)
   end
+
+
+  # ── Helpers de entrada de usuario ───────────────────────────────
 
   def prompt_secret(label)
     print "\n  #{label}: "
@@ -470,12 +513,19 @@ class PasswordManager
     idx
   end
 
+  # ── Helpers de presentación ──────────────────────────────────────
+
+  # Ordena @entries alfabéticamente por nombre de servicio
+  # sin distinción de mayúsculas. Se llama al cargar, añadir y editar.
+  def sort_entries!
+    @entries.sort_by! { |e| e['service'].to_s.downcase }
+  end
 
   def print_entries_table
     sep = '─' * 60
 
     puts "\n  #{sep}"
-    puts "  #{"N°".ljust(5)} #{"Servicio".ljust(27)} Usuario"
+    puts "  #{"N°".ljust(5)} #{"Servicio ↑ A–Z".ljust(27)} Usuario"
     puts "  #{sep}"
 
     if @entries.empty?
@@ -502,16 +552,22 @@ class PasswordManager
       'username' => username,
       'password' => password
     }
+    sort_entries!
     save_vault
   end
 
+  # ── Helpers de búsqueda ──────────────────────────────────────────
 
+  # Devuelve true si la query aparece (parcial, sin mayúsculas)
+  # en el servicio O en el usuario de la entrada.
   def entry_matches?(entry, query)
     q = query.downcase
     entry['service'].to_s.downcase.include?(q) ||
       entry['username'].to_s.downcase.include?(q)
   end
 
+  # Envuelve la primera aparición de query en text con color cian+negrita.
+  # Devuelve el text sin cambios si no hay coincidencia.
   def highlight(text, query)
     idx = text.downcase.index(query.downcase)
     return text unless idx
@@ -521,7 +577,8 @@ class PasswordManager
     "#{before}\e[1;36m#{match}\e[0m#{after}"
   end
 
-
+  # Muestra la tabla de resultados con los términos resaltados.
+  # results es un array de pares [entry, original_index].
   def print_search_table(results, query)
     sep = '─' * 60
     puts "\n  #{sep}"
@@ -535,7 +592,8 @@ class PasswordManager
     puts "  #{sep}\n"
   end
 
-
+  # Pide al usuario el N° original de una entrada de la lista de resultados.
+  # Devuelve el índice si es válido, nil si el usuario pulsa Enter o el N° no existe.
   def prompt_result_index(results)
     valid = results.map { |_e, i| i }
     print "\n  Introduce el N° para ver detalle (Enter para omitir): "
