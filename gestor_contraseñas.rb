@@ -165,15 +165,17 @@ class PasswordManager
     clear_screen
     case option
     when '1' then cmd_browse
-    when '2' then cmd_add
-    when '3' then cmd_edit
-    when '4' then cmd_delete
-    when '5' then cmd_change_master
+    when '2' then cmd_search
+    when '3' then cmd_add
+    when '4' then cmd_edit
+    when '5' then cmd_delete
+    when '6' then cmd_change_master
     when '0' then cmd_exit
     else
-      err "Opción '#{option}' no válida. Elige entre 0 y 5."
+      err "Opción '#{option}' no válida. Elige entre 0 y 6."
     end
   end
+
 
   # ── Opción 1: Ver servicios y detalle de una entrada ────────────
 
@@ -196,7 +198,56 @@ class PasswordManager
     pause
   end
 
-  # ── Opción 2: Añadir entrada (manual o con contraseña generada) ─
+  def cmd_search
+    return empty_vault_notice if @entries.empty?
+
+    loop do
+      puts "  ── Buscar entradas ─────────────────────────────────────"
+      puts "  Campos: servicio y usuario · sin distinción de mayúsculas"
+      puts "  Enter sin texto vuelve al menú.\n"
+
+      print "\n  🔍 Buscar: "
+      query = gets.chomp.strip
+
+      if query.empty?
+        info "Búsqueda cancelada."
+        pause
+        return
+      end
+
+      results = @entries.each_with_index.select { |e, _i| entry_matches?(e, query) }
+
+      clear_screen
+
+      if results.empty?
+        puts "  ── Sin resultados ──────────────────────────────────────"
+        warn_msg "No se encontró ninguna entrada para \"#{query}\"."
+      else
+        total_str   = "#{@entries.size} #{pluralize(@entries.size, 'entrada', 'entradas')}"
+        results_str = "#{results.size} #{pluralize(results.size, 'resultado', 'resultados')}"
+        puts "  ── #{results_str} para \"#{query}\" (de #{total_str}) ──"
+        print_search_table(results, query)
+
+        idx = prompt_result_index(results)
+        if idx
+          e   = @entries[idx]
+          sep = '─' * 50
+          puts
+          puts "  #{sep}"
+          puts "  Servicio   : #{e['service']}"
+          puts "  Usuario    : #{e['username']}"
+          puts "  Contraseña : \e[1;33m#{e['password']}\e[0m"
+          puts "  #{sep}"
+        end
+      end
+
+      print "\n  ¿Realizar otra búsqueda? (s/N): "
+      break unless gets.chomp.strip.downcase == 's'
+      clear_screen
+    end
+
+    pause
+  end
 
   def cmd_add
     puts "  ── Añadir nueva entrada ────────────────────────────────"
@@ -214,8 +265,6 @@ class PasswordManager
     ok "Entrada añadida y almacén guardado."
     pause
   end
-
-  # ── Opción 3: Editar una entrada existente ──────────────────────
 
   def cmd_edit
     return empty_vault_notice if @entries.empty?
@@ -238,7 +287,7 @@ class PasswordManager
     input_usr = gets.chomp.strip
     new_usr   = input_usr.empty? ? e['username'] : input_usr
 
-    puts "  Contraseña  [Enter para conservar | 'g' para generar nueva]:"
+    puts "  Contraseña  [actual oculta — Enter para conservar | 'g' para generar nueva]:"
     print "  > "
     input_pwd = gets.chomp.strip
 
@@ -284,8 +333,6 @@ class PasswordManager
     pause
   end
 
-  # ── Opción 4: Eliminar una entrada por índice ───────────────────
-
   def cmd_delete
     return empty_vault_notice if @entries.empty?
 
@@ -309,9 +356,6 @@ class PasswordManager
     end
     pause
   end
-
-
-  # ── Opción 5: Cambiar contraseña maestra ────────────────────────
 
   def cmd_change_master
     puts "  ── Cambiar contraseña maestra ──────────────────────────"
@@ -348,7 +392,6 @@ class PasswordManager
     pause
   end
 
-
   # ── Opción 0: Salir del programa ────────────────────────────────
 
   def cmd_exit
@@ -356,9 +399,6 @@ class PasswordManager
     puts "\n  ⚪  ¡Hasta pronto! Tu almacén está protegido."
     exit(0)
   end
-
-
-  # ── Helpers de entrada de usuario ───────────────────────────────
 
   def prompt_secret(label)
     print "\n  #{label}: "
@@ -430,7 +470,6 @@ class PasswordManager
     idx
   end
 
-  # ── Helpers de presentación ──────────────────────────────────────
 
   def print_entries_table
     sep = '─' * 60
@@ -466,8 +505,59 @@ class PasswordManager
     save_vault
   end
 
+
+  def entry_matches?(entry, query)
+    q = query.downcase
+    entry['service'].to_s.downcase.include?(q) ||
+      entry['username'].to_s.downcase.include?(q)
+  end
+
+  def highlight(text, query)
+    idx = text.downcase.index(query.downcase)
+    return text unless idx
+    before = text[0, idx]
+    match  = text[idx, query.length]
+    after  = text[(idx + query.length)..]
+    "#{before}\e[1;36m#{match}\e[0m#{after}"
+  end
+
+
+  def print_search_table(results, query)
+    sep = '─' * 60
+    puts "\n  #{sep}"
+    puts "  #{"N°".ljust(5)} #{"Servicio".ljust(27)} Usuario"
+    puts "  #{sep}"
+    results.each do |entry, orig_idx|
+      svc  = truncate(entry['service'],  25).ljust(27)
+      user = truncate(entry['username'], 25)
+      puts "  #{orig_idx.to_s.ljust(5)} #{highlight(svc, query)} #{highlight(user, query)}"
+    end
+    puts "  #{sep}\n"
+  end
+
+
+  def prompt_result_index(results)
+    valid = results.map { |_e, i| i }
+    print "\n  Introduce el N° para ver detalle (Enter para omitir): "
+    input = gets.chomp.strip
+    return nil if input.empty?
+
+    unless input.match?(/\A\d+\z/)
+      err "Introduce un número entero válido."
+      return nil
+    end
+
+    idx = input.to_i
+    unless valid.include?(idx)
+      err "El N° #{idx} no aparece en los resultados."
+      return nil
+    end
+
+    idx
+  end
+
   def empty_vault_notice
-    info "El almacén está vacío. Añade entradas con la opción 2."
+    info "El almacén está vacío. Añade entradas con la opción 3."
     pause
   end
 
@@ -521,10 +611,11 @@ class PasswordManager
       │                MENÚ PRINCIPAL                   │
       ├─────────────────────────────────────────────────┤
       │  1. Ver entradas                                │
-      │  2. Añadir entrada                              │
-      │  3. Editar entrada                              │
-      │  4. Eliminar entrada                            │
-      │  5. Cambiar contraseña maestra                  │
+      │  2. Buscar entradas                             │
+      │  3. Añadir entrada                              │
+      │  4. Editar entrada                              │
+      │  5. Eliminar entrada                            │
+      │  6. Cambiar contraseña maestra                  │
       │  0. Salir                                       │
       └─────────────────────────────────────────────────┘
     MENU
