@@ -268,6 +268,7 @@ class PasswordManager
 
   # ── Opción 2: Buscar y filtrar entradas ─────────────────────────
   # Búsqueda parcial, sin distinción de mayúsculas, en servicio Y usuario.
+  # El prompt de búsqueda autocompleta por nombre de servicio (Tab).
   # Los términos que coincidan aparecen resaltados en cian.
   # Desde los resultados se puede ver el detalle de una entrada.
   # Al final se ofrece repetir la búsqueda sin volver al menú.
@@ -277,14 +278,14 @@ class PasswordManager
 
     loop do
       puts "  ── Buscar entradas ─────────────────────────────────────"
-      puts "  Campos: servicio y usuario · sin distinción de mayúsculas"
-      puts "  Consejo: escribe parte del nombre (p.ej. 'git', 'gmail')."
-      puts "  Enter sin texto vuelve al menú.\n"
+      puts "  Autocompleta por nombre de servicio con Tab."
+      puts "  La búsqueda también cubre el campo usuario.\n"
 
-      print "\n  🔍 Buscar: "
-      query = gets.chomp.strip
+      candidates = @entries.map { |e| e['service'] }.uniq
+      puts
+      query = prompt_with_autocomplete("🔍 Buscar", candidates)
 
-      if query.empty?
+      if query.nil? || query.empty?
         info "Búsqueda cancelada."
         pause
         return
@@ -603,6 +604,104 @@ class PasswordManager
     secret
   rescue IOError
     $stdin.gets.to_s.chomp
+  end
+
+  # Prompt interactivo con autocompletado en tiempo real.
+  #
+  # Mientras el usuario escribe, filtra 'candidates' por prefijo y
+  # muestra hasta 6 coincidencias debajo del cursor (en gris).
+  # La coincidencia seleccionada aparece resaltada en verde [entre corchetes].
+  #
+  #   Tab        → ciclar por las sugerencias
+  #   Enter      → confirmar lo escrito (o la sugerencia seleccionada)
+  #   Backspace  → borrar el último carácter
+  #   Esc        → cancelar y devolver nil
+  #
+  # Si el terminal no soporta getch, cae a un prompt simple sin color.
+  # Devuelve el texto introducido, o nil si el usuario pulsó Esc.
+  def prompt_with_autocomplete(label, candidates)
+    unless $stdin.respond_to?(:getch)
+      print "\n  #{label}: "
+      input = $stdin.gets.to_s.chomp.strip
+      return input.empty? ? nil : input
+    end
+
+    buffer  = ''
+    tab_idx = -1
+    drawn   = false
+
+    loop do
+      # Coincidencias por prefijo, sin distinción de mayúsculas, máx. 6
+      matches = buffer.empty? ? [] : candidates
+        .select  { |c| c.downcase.start_with?(buffer.downcase) }
+        .sort_by { |c| c.downcase }
+        .first(6)
+
+      # Borrar el área dibujada anteriormente (línea input + línea sugerencias)
+      if drawn
+        print "\r\e[2K"       # limpiar línea de sugerencias (línea actual)
+        print "\e[1A\r\e[2K"  # subir y limpiar línea de input
+      end
+      drawn = true
+
+      # ── Línea 1: prompt + texto actual ──────────────────────────
+      print "  #{label}: #{buffer}"
+
+      # ── Línea 2: sugerencias ────────────────────────────────────
+      print "\n"
+      if matches.any?
+        parts = matches.each_with_index.map do |m, i|
+          i == tab_idx ? "\e[1;32m[#{m}]\e[0m" : "\e[90m#{m}\e[0m"
+        end
+        print "  ↳ #{parts.join('  ')}"
+      elsif buffer.empty?
+        print "  \e[90m↳ escribe para ver sugerencias  ·  Tab  ·  Esc para cancelar\e[0m"
+      else
+        print "  \e[90m↳ sin coincidencias\e[0m"
+      end
+      $stdout.flush
+
+      char = begin
+        $stdin.getch
+      rescue StandardError
+        return nil
+      end
+
+      case char
+      when "\r", "\n"          # Enter: confirmar
+        print "\r\e[2K"
+        print "\e[1A\r\e[2K"
+        print "  #{label}: #{buffer}\n"
+        return buffer.empty? ? nil : buffer
+
+      when "\t"                # Tab: ciclar por coincidencias
+        if matches.any?
+          tab_idx = (tab_idx + 1) % matches.size
+          buffer  = matches[tab_idx]
+        end
+
+      when "\x7f", "\b"        # Backspace: borrar último carácter
+        buffer  = buffer[0..-2] unless buffer.empty?
+        tab_idx = -1
+
+      when "\e"                # Esc: cancelar
+        # Consumir bytes adicionales (p.ej. flechas envían \e[A, \e[B…)
+        begin
+          $stdin.read_nonblock(3)
+        rescue StandardError
+          # Esc simple — no hay bytes extra
+        end
+        print "\r\e[2K"
+        print "\e[1A\r\e[2K\n"
+        return nil
+
+      when /[\x20-\x7e]/       # ASCII imprimible
+        buffer  += char
+        tab_idx  = -1
+        # Nota: caracteres UTF-8 multi-byte (é, ñ…) llegan en varios
+        # bytes; se ignoran para no corromper el buffer.
+      end
+    end
   end
 
   def prompt_required(label)
