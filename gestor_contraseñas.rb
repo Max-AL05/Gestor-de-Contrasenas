@@ -5,6 +5,7 @@ require 'securerandom'
 require 'openssl'
 require 'json'
 require 'io/console'
+require 'timeout'
 
 module PasswordGenerator
   UPPERCASE = ('A'..'Z').to_a.freeze
@@ -97,11 +98,12 @@ end
 
 
 class PasswordManager
-  VAULT_FILE      = 'vault.json'
-  MIN_MASTER_LEN  = 8
-  DEFAULT_PWD_LEN = 16
-  MIN_PWD_LEN     = 4
-  MAX_PWD_LEN     = 128
+  VAULT_FILE         = 'vault.json'
+  MIN_MASTER_LEN     = 8
+  DEFAULT_PWD_LEN    = 16
+  MIN_PWD_LEN        = 4
+  MAX_PWD_LEN        = 128
+  INACTIVITY_TIMEOUT = 5 * 60
 
   def initialize
     @master_password = nil
@@ -116,7 +118,13 @@ class PasswordManager
 
     loop do
       show_menu
-      dispatch(gets.chomp.strip)
+      begin
+        option = Timeout.timeout(INACTIVITY_TIMEOUT) { $stdin.gets.chomp.strip }
+      rescue Timeout::Error
+        lock_session!
+        next
+      end
+      dispatch(option)
     end
   end
 
@@ -193,13 +201,17 @@ class PasswordManager
 
     e   = @entries[idx]
     sep = '─' * 50
+
+    # Servicio y usuario no son sensibles: se muestran sin restricción
     puts
     puts "  #{sep}"
-    puts "  Servicio   : #{e['service']}"
-    puts "  Usuario    : #{e['username']}"
-    puts "  Contraseña : \e[1;33m#{e['password']}\e[0m"
+    puts "  Servicio : #{e['service']}"
+    puts "  Usuario  : #{e['username']}"
     puts "  #{sep}"
-    pause
+
+    # La contraseña requiere confirmación de identidad
+    confirmed = confirm_and_show_password(e)
+    pause unless confirmed   # si falló, pausa para que se lea el error
   end
 
 
@@ -248,10 +260,10 @@ class PasswordManager
           sep = '─' * 50
           puts
           puts "  #{sep}"
-          puts "  Servicio   : #{e['service']}"
-          puts "  Usuario    : #{e['username']}"
-          puts "  Contraseña : \e[1;33m#{e['password']}\e[0m"
+          puts "  Servicio : #{e['service']}"
+          puts "  Usuario  : #{e['username']}"
           puts "  #{sep}"
+          confirm_and_show_password(e)
         end
       end
 
@@ -441,6 +453,48 @@ class PasswordManager
   end
 
 
+  # ── Autocierre por inactividad ───────────────────────────────────
+  # Se activa cuando el usuario no escribe nada en el menú principal
+  # durante INACTIVITY_TIMEOUT segundos.
+  # Pasos: limpia datos sensibles → muestra pantalla de bloqueo →
+  #        pide contraseña → re-descifra almacén → reanuda sesión.
+
+  def lock_session!
+    # 1. Limpiar la contraseña maestra y las entradas de la memoria
+    @master_password&.replace("\x00" * @master_password.bytesize)
+    @master_password = nil
+    @entries = []
+
+    clear_screen
+    show_lock_banner
+
+    # 2. Pedir contraseña hasta acertar
+    loop do
+      password = prompt_secret("Contraseña maestra para desbloquear")
+
+      print "\n    Verificando..."
+      $stdout.flush
+
+      begin
+        if File.exist?(VAULT_FILE)
+          encrypted_data = JSON.parse(File.read(VAULT_FILE))
+          @entries       = JSON.parse(Crypto.decrypt(encrypted_data, password))
+          sort_entries!
+        end
+        @master_password = password
+        print "\r#{' ' * 22}\r"
+        ok "Sesión reanudada. Bienvenido de vuelta."
+        sleep(1)
+        clear_screen
+        break
+      rescue OpenSSL::Cipher::CipherError
+        print "\r#{' ' * 22}\r"
+        err "Contraseña incorrecta. Inténtalo de nuevo."
+      end
+    end
+  end
+
+
   # ── Helpers de entrada de usuario ───────────────────────────────
 
   def prompt_secret(label)
@@ -514,6 +568,48 @@ class PasswordManager
   end
 
   # ── Helpers de presentación ──────────────────────────────────────
+
+  # Pide la contraseña maestra y, si coincide, muestra la contraseña
+  # de la entrada en pantalla. Protege contra accesos no autorizados
+  # cuando alguien se acerca a una terminal ya desbloqueada.
+  #
+  # Comportamiento:
+  #   · Hasta 3 intentos antes de denegar el acceso.
+  #   · En cada intento fallido muestra cuántos quedan.
+  #   · Si acierta: muestra la contraseña, espera Enter y limpia pantalla.
+  #   · Retorna true si se mostró la contraseña, false si se denegó.
+  def confirm_and_show_password(entry)
+    max_attempts = 3
+
+    max_attempts.times do |attempt|
+      remaining = max_attempts - attempt
+      hint      = attempt > 0 ? " (#{remaining} #{pluralize(remaining, 'intento', 'intentos')} restante(s))" : ""
+
+      pwd = prompt_secret("Contraseña maestra para ver#{hint}")
+
+      if pwd == @master_password
+        sep = '─' * 50
+        puts
+        puts "  #{sep}"
+        puts "  Servicio   : #{entry['service']}"
+        puts "  Usuario    : #{entry['username']}"
+        puts "  Contraseña : \e[1;33m#{entry['password']}\e[0m"
+        puts "  #{sep}"
+        print "\n  Pulsa Enter para ocultar la contraseña y limpiar la pantalla..."
+        $stdin.gets
+        clear_screen
+        return true
+      end
+
+      if attempt < max_attempts - 1
+        err "Contraseña incorrecta. Inténtalo de nuevo."
+      else
+        err "Demasiados intentos fallidos. Acceso denegado."
+      end
+    end
+
+    false
+  end
 
   # Ordena @entries alfabéticamente por nombre de servicio
   # sin distinción de mayúsculas. Se llama al cargar, añadir y editar.
@@ -658,8 +754,34 @@ class PasswordManager
       ║  KDF        : PBKDF2-HMAC-SHA256 · 100 000 iter.      ║
       ║  Almacén    : #{VAULT_FILE.ljust(39)} ║
       ║  Permisos   : 0600                                    ║
+      ║  Autocierre : #{format_timeout(INACTIVITY_TIMEOUT).ljust(39)} ║
       ╚═══════════════════════════════════════════════════════╝
     BANNER
+  end
+
+  # Pantalla que aparece cuando la sesión se bloquea por inactividad.
+  def show_lock_banner
+    sep      = '─' * 55
+    time_str = format_timeout(INACTIVITY_TIMEOUT)
+    puts <<~LOCK
+
+      #{sep}
+
+                       SESIÓN BLOQUEADA
+
+        Inactividad detectada (#{time_str}).
+        Introduce tu contraseña maestra para continuar.
+
+      #{sep}
+
+    LOCK
+  end
+
+  # Convierte segundos a texto legible, p.ej. 300 → "5 min".
+  def format_timeout(seconds)
+    mins = seconds / 60
+    secs = seconds % 60
+    secs.zero? ? "#{mins} min" : "#{mins} min #{secs} s"
   end
 
   def show_menu
