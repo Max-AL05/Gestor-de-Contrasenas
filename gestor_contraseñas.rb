@@ -777,7 +777,7 @@ class PasswordManager
     LOCK
   end
 
-  # Convierte segundos a texto legible, p.ej. 300 → "5 min".
+  # Convierte segundos a texto legible".
   def format_timeout(seconds)
     mins = seconds / 60
     secs = seconds % 60
