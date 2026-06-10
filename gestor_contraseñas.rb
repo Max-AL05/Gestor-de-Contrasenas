@@ -98,16 +98,19 @@ end
 
 
 class PasswordManager
-  VAULT_FILE         = 'vault.json'
-  MIN_MASTER_LEN     = 8
-  DEFAULT_PWD_LEN    = 16
-  MIN_PWD_LEN        = 4
-  MAX_PWD_LEN        = 128
-  INACTIVITY_TIMEOUT = 5 * 60
+  VAULT_FILE            = 'vault.json'
+  AUDIT_FILE            = 'audit.log'
+  AUDIT_RETENTION_DAYS  = 15            # días que se conservan los eventos
+  MIN_MASTER_LEN        = 8
+  DEFAULT_PWD_LEN       = 16
+  MIN_PWD_LEN           = 4
+  MAX_PWD_LEN           = 128
+  INACTIVITY_TIMEOUT    = 5 * 60        # segundos — ajusta aquí si lo deseas
 
   def initialize
     @master_password = nil
-    @entries = []
+    @entries         = []
+    @audit_log       = []
   end
 
   def run
@@ -115,6 +118,8 @@ class PasswordManager
     show_banner
     authenticate
     load_vault
+    load_audit_log
+    log_event('login_ok')
 
     loop do
       show_menu
@@ -173,6 +178,51 @@ class PasswordManager
     err "No se pudo guardar el almacén: #{e.message}"
   end
 
+  # Carga el registro de auditoría desde disco y elimina los eventos
+  # más antiguos que AUDIT_RETENTION_DAYS. Si el archivo no existe o
+  # está dañado, arranca con un log vacío sin interrumpir el programa.
+  def load_audit_log
+    return unless File.exist?(AUDIT_FILE)
+    @audit_log = JSON.parse(File.read(AUDIT_FILE))
+    purge_old_audit_events
+  rescue StandardError
+    @audit_log = []
+  end
+
+  # Elimina de @audit_log los eventos anteriores al periodo de retención
+  # y sobreescribe el archivo si se borró alguno.
+  def purge_old_audit_events
+    cutoff  = Time.now - (AUDIT_RETENTION_DAYS * 24 * 60 * 60)
+    before  = @audit_log.size
+    @audit_log.select! do |event|
+      Time.iso8601(event['timestamp']) >= cutoff
+    rescue StandardError
+      true   # conservar el evento si el timestamp es ilegible
+    end
+    save_audit_log if @audit_log.size < before
+  end
+
+  # Persiste el registro de auditoría. Si falla (permisos, disco
+  # lleno…) no interrumpe el flujo principal del programa.
+  def save_audit_log
+    File.write(AUDIT_FILE, JSON.pretty_generate(@audit_log))
+    File.chmod(0o600, AUDIT_FILE)
+  rescue StandardError
+    # No crítico — el programa sigue funcionando sin el log
+  end
+
+  # Añade un evento al registro y lo guarda en disco inmediatamente.
+  # action  — clave del evento (p.ej. 'entry_add', 'password_view')
+  # detail  — contexto opcional (p.ej. nombre del servicio)
+  def log_event(action, detail = nil)
+    @audit_log << {
+      'timestamp' => Time.now.iso8601,
+      'action'    => action,
+      'detail'    => detail
+    }
+    save_audit_log
+  end
+
   def dispatch(option)
     clear_screen
     case option
@@ -182,9 +232,10 @@ class PasswordManager
     when '4' then cmd_edit
     when '5' then cmd_delete
     when '6' then cmd_change_master
+    when '7' then cmd_audit
     when '0' then cmd_exit
     else
-      err "Opción '#{option}' no válida. Elige entre 0 y 6."
+      err "Opción '#{option}' no válida. Elige entre 0 y 7."
     end
   end
 
@@ -373,6 +424,7 @@ class PasswordManager
     @entries[idx]['password'] = new_pwd
     sort_entries!
     save_vault
+    log_event('entry_edit', new_svc)
 
     ok "Entrada actualizada y almacén guardado."
     pause
@@ -396,8 +448,10 @@ class PasswordManager
     input = gets.chomp.strip.downcase
 
     if input == 's'
+      deleted_service = e['service']
       @entries.delete_at(idx)
       save_vault
+      log_event('entry_delete', deleted_service)
       ok "Entrada eliminada y almacén guardado."
     else
       info "Operación cancelada."
@@ -444,6 +498,42 @@ class PasswordManager
   end
 
 
+  # ── Opción 7: Ver registro de auditoría ─────────────────────────
+  # Muestra los últimos eventos del registro en una tabla.
+  # Incluye: fecha/hora, tipo de acción y servicio afectado.
+
+  def cmd_audit
+    puts "  ── Registro de auditoría ───────────────────────────────"
+
+    if @audit_log.empty?
+      info "No hay eventos registrados todavía."
+      pause
+      return
+    end
+
+    page  = 20                         # eventos por pantalla
+    total = @audit_log.size
+    shown = @audit_log.last(page)
+    sep   = '─' * 68
+
+    puts "\n  #{sep}"
+    puts "  #{"Fecha y hora".ljust(21)} #{"Acción".ljust(24)} Servicio"
+    puts "  #{sep}"
+
+    shown.each do |event|
+      time    = format_audit_time(event['timestamp'])
+      action  = translate_action(event['action']).ljust(24)
+      detail  = truncate(event['detail'] || '—', 20)
+      puts "  #{time.ljust(21)} #{action} #{detail}"
+    end
+
+    puts "  #{sep}"
+    puts "\n  #{total} evento(s) en total." \
+         "#{total > page ? " Mostrando los últimos #{page}." : ''}"
+    pause
+  end
+
+
   # ── Opción 0: Salir del programa ────────────────────────────────
 
   def cmd_exit
@@ -460,7 +550,10 @@ class PasswordManager
   #        pide contraseña → re-descifra almacén → reanuda sesión.
 
   def lock_session!
-    # 1. Limpiar la contraseña maestra y las entradas de la memoria
+    # 1. Registrar el bloqueo ANTES de limpiar la contraseña
+    log_event('session_lock')
+
+    # 2. Limpiar la contraseña maestra y las entradas de la memoria
     @master_password&.replace("\x00" * @master_password.bytesize)
     @master_password = nil
     @entries = []
@@ -468,7 +561,7 @@ class PasswordManager
     clear_screen
     show_lock_banner
 
-    # 2. Pedir contraseña hasta acertar
+    # 3. Pedir contraseña hasta acertar
     loop do
       password = prompt_secret("Contraseña maestra para desbloquear")
 
@@ -482,12 +575,14 @@ class PasswordManager
           sort_entries!
         end
         @master_password = password
+        log_event('session_unlock_ok')
         print "\r#{' ' * 22}\r"
         ok "Sesión reanudada. Bienvenido de vuelta."
         sleep(1)
         clear_screen
         break
       rescue OpenSSL::Cipher::CipherError
+        log_event('session_unlock_fail')
         print "\r#{' ' * 22}\r"
         err "Contraseña incorrecta. Inténtalo de nuevo."
       end
@@ -588,6 +683,7 @@ class PasswordManager
       pwd = prompt_secret("Contraseña maestra para ver#{hint}")
 
       if pwd == @master_password
+        log_event('password_view', entry['service'])
         sep = '─' * 50
         puts
         puts "  #{sep}"
@@ -601,6 +697,7 @@ class PasswordManager
         return true
       end
 
+      log_event('password_view_fail', entry['service'])
       if attempt < max_attempts - 1
         err "Contraseña incorrecta. Inténtalo de nuevo."
       else
@@ -650,6 +747,7 @@ class PasswordManager
     }
     sort_entries!
     save_vault
+    log_event('entry_add', service)
   end
 
   # ── Helpers de búsqueda ──────────────────────────────────────────
@@ -744,6 +842,28 @@ class PasswordManager
     system('clear') || system('cls')
   end
 
+  # Convierte un timestamp ISO 8601 a formato legible dd/mm/aaaa HH:MM:SS.
+  def format_audit_time(iso_string)
+    Time.iso8601(iso_string).strftime('%d/%m/%Y %H:%M:%S')
+  rescue StandardError
+    iso_string.to_s[0, 19]
+  end
+
+  # Traduce la clave interna del evento a texto legible en español.
+  def translate_action(action)
+    {
+      'login_ok'             => '[OK] Inicio de sesion',
+      'session_lock'         => '[!!] Bloqueo automatico',
+      'session_unlock_ok'    => '[OK] Desbloqueo',
+      'session_unlock_fail'  => '[!!] Fallo desbloqueo',
+      'password_view'        => '[OK] Ver contraseña',
+      'password_view_fail'   => '[!!] Fallo ver contraseña',
+      'entry_add'            => '[+]  Nueva entrada',
+      'entry_edit'           => '[~]  Entrada editada',
+      'entry_delete'         => '[-]  Entrada eliminada',
+    }.fetch(action, action)
+  end
+
   def show_banner
     puts <<~BANNER
 
@@ -777,7 +897,7 @@ class PasswordManager
     LOCK
   end
 
-  # Convierte segundos a texto legible".
+  # Convierte segundos a texto legible, p.ej. 300 → "5 min".
   def format_timeout(seconds)
     mins = seconds / 60
     secs = seconds % 60
@@ -796,6 +916,7 @@ class PasswordManager
       │  4. Editar entrada                              │
       │  5. Eliminar entrada                            │
       │  6. Cambiar contraseña maestra                  │
+      │  7. Ver registro de auditoría                   │
       │  0. Salir                                       │
       └─────────────────────────────────────────────────┘
     MENU

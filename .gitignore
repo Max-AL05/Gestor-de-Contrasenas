@@ -20,3 +20,5 @@ vault.json
 
 # Dependencias (si usas Bundler)
 Gemfile.lock
+
+audit.log
