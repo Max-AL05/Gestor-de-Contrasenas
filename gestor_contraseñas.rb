@@ -1,3 +1,6 @@
+# encoding: utf-8
+# frozen_string_literal: true
+
 require 'securerandom'
 require 'openssl'
 require 'json'
@@ -9,22 +12,42 @@ module PasswordGenerator
   LOWERCASE = ('a'..'z').to_a.freeze
   DIGITS    = ('0'..'9').to_a.freeze
   SYMBOLS   = '!@#$%^&*()_+-=[]{}|;:,.<>?'.chars.freeze
-  ALL_CHARS = (UPPERCASE + LOWERCASE + DIGITS + SYMBOLS).freeze
 
-  def self.generate(length = 16)
-    raise ArgumentError, "La longitud mínima es 4 caracteres" if length < 4
+  # Genera una contraseña criptográficamente segura.
+  #
+  # length — número de caracteres (mínimo: número de conjuntos activos)
+  # opts   — hash con claves :uppercase, :lowercase, :digits, :symbols (true/false)
+  #          Por defecto todos los conjuntos están activos.
+  #
+  # Garantiza al menos un carácter de cada conjunto activo y mezcla
+  # el resultado con Fisher-Yates usando SecureRandom.
+  def self.generate(length = 16, opts = {})
+    use_upper   = opts.fetch(:uppercase, true)
+    use_lower   = opts.fetch(:lowercase, true)
+    use_digits  = opts.fetch(:digits,    true)
+    use_symbols = opts.fetch(:symbols,   true)
 
-    password = [
-      UPPERCASE[SecureRandom.random_number(UPPERCASE.size)],
-      LOWERCASE[SecureRandom.random_number(LOWERCASE.size)],
-      DIGITS[SecureRandom.random_number(DIGITS.size)],
-      SYMBOLS[SecureRandom.random_number(SYMBOLS.size)]
-    ]
+    sets = []
+    sets << UPPERCASE if use_upper
+    sets << LOWERCASE if use_lower
+    sets << DIGITS    if use_digits
+    sets << SYMBOLS   if use_symbols
 
-    (length - 4).times do
-      password << ALL_CHARS[SecureRandom.random_number(ALL_CHARS.size)]
+    raise ArgumentError, "Selecciona al menos un tipo de carácter" if sets.empty?
+
+    all = sets.flatten
+    min = sets.size
+    raise ArgumentError, "Longitud mínima con los conjuntos seleccionados: #{min}" if length < min
+
+    # Un carácter garantizado de cada conjunto activo
+    password = sets.map { |s| s[SecureRandom.random_number(s.size)] }
+
+    # Rellenar el resto
+    (length - min).times do
+      password << all[SecureRandom.random_number(all.size)]
     end
 
+    # Fisher-Yates con valores criptográficos
     password.shuffle(random: SecureRandom).join
   end
 end
@@ -97,6 +120,7 @@ end
 class PasswordManager
   VAULT_FILE            = 'vault.json'
   AUDIT_FILE            = 'audit.log'
+  CHECKSUM_FILE         = 'vault.json.sha256'   # hash de integridad del almacén
   AUDIT_RETENTION_DAYS  = 15
   MAX_HISTORY           = 5             # contraseñas anteriores que se conservan
   MIN_MASTER_LEN        = 8
@@ -117,6 +141,7 @@ class PasswordManager
     authenticate
     load_vault
     load_audit_log
+    verify_checksum   # advertir si vault.json fue modificado externamente
     log_event('login_ok')
 
     loop do
@@ -172,10 +197,53 @@ class PasswordManager
 
     File.write(VAULT_FILE, JSON.pretty_generate(encrypted_data))
     File.chmod(0o600, VAULT_FILE)
+    save_checksum   # actualizar el hash de integridad tras cada escritura
   rescue Errno::EACCES => e
     err "No se pudo guardar el almacén: #{e.message}"
   end
 
+  # Calcula el SHA-256 del archivo vault.json cifrado y lo guarda en
+  # CHECKSUM_FILE. Si falla (disco lleno, permisos…) no bloquea el guardado.
+  def save_checksum
+    digest = OpenSSL::Digest::SHA256.file(VAULT_FILE).hexdigest
+    File.write(CHECKSUM_FILE, digest)
+    File.chmod(0o600, CHECKSUM_FILE)
+  rescue StandardError
+    # No crítico — el vault ya se guardó correctamente
+  end
+
+  # Compara el SHA-256 actual de vault.json con el hash registrado.
+  # Si no coinciden, muestra una advertencia, registra el evento en el
+  # audit log y espera confirmación del usuario antes de continuar.
+  # Llamar DESPUÉS de load_audit_log para que el log esté disponible.
+  def verify_checksum
+    return unless File.exist?(VAULT_FILE) && File.exist?(CHECKSUM_FILE)
+
+    saved   = File.read(CHECKSUM_FILE).strip
+    current = OpenSSL::Digest::SHA256.file(VAULT_FILE).hexdigest
+    return if saved == current
+
+    # ── Alerta de integridad ─────────────────────────────────────
+    sep = '─' * 57
+    puts "\n  #{sep}"
+    puts "  ADVERTENCIA: INTEGRIDAD DEL ALMACEN COMPROMETIDA"
+    puts "  #{sep}"
+    warn_msg "'#{VAULT_FILE}' fue modificado fuera del programa."
+    warn_msg "El hash SHA-256 registrado no coincide con el actual."
+    warn_msg "Si no realizaste cambios manuales, investiga el origen."
+    puts "  #{sep}\n"
+
+    log_event('vault_tamper_detected')
+
+    print "  Pulsa Enter para continuar de todas formas..."
+    gets
+  rescue StandardError
+    # Error inesperado — no bloquear la sesión
+  end
+
+  # Carga el registro de auditoría desde disco y elimina los eventos
+  # más antiguos que AUDIT_RETENTION_DAYS. Si el archivo no existe o
+  # está dañado, arranca con un log vacío sin interrumpir el programa.
   def load_audit_log
     return unless File.exist?(AUDIT_FILE)
     @audit_log = JSON.parse(File.read(AUDIT_FILE))
@@ -184,6 +252,8 @@ class PasswordManager
     @audit_log = []
   end
 
+  # Elimina de @audit_log los eventos anteriores al periodo de retención
+  # y sobreescribe el archivo si se borró alguno.
   def purge_old_audit_events
     cutoff  = Time.now - (AUDIT_RETENTION_DAYS * 24 * 60 * 60)
     before  = @audit_log.size
@@ -195,17 +265,25 @@ class PasswordManager
     save_audit_log if @audit_log.size < before
   end
 
+  # Persiste el registro de auditoría. Si falla (permisos, disco
+  # lleno…) no interrumpe el flujo principal del programa.
   def save_audit_log
     File.write(AUDIT_FILE, JSON.pretty_generate(@audit_log))
     File.chmod(0o600, AUDIT_FILE)
   rescue StandardError
+    # No crítico — el programa sigue funcionando sin el log
   end
 
+  # Añade un evento al registro y lo guarda en disco inmediatamente.
+  # action  — clave del evento (p.ej. 'entry_add', 'password_view')
+  # detail  — contexto opcional (p.ej. nombre del servicio)
+  # Los códigos ANSI se eliminan del detail antes de guardar para
+  # que audit.log sea siempre texto plano legible.
   def log_event(action, detail = nil)
     @audit_log << {
       'timestamp' => Time.now.iso8601,
       'action'    => action,
-      'detail'    => detail
+      'detail'    => detail ? strip_ansi(detail) : nil
     }
     save_audit_log
   end
@@ -228,6 +306,8 @@ class PasswordManager
   end
 
 
+  # ── Opción 1: Ver servicios y detalle de una entrada ────────────
+
   def cmd_browse
     puts "  ── Servicios almacenados ───────────────────────────────"
     print_entries_table
@@ -238,15 +318,26 @@ class PasswordManager
 
     e   = @entries[idx]
     sep = '─' * 50
+
+    # Servicio y usuario no son sensibles: se muestran sin restricción
     puts
     puts "  #{sep}"
     puts "  Servicio : #{e['service']}"
     puts "  Usuario  : #{e['username']}"
     puts "  #{sep}"
+
+    # La contraseña requiere confirmación de identidad
     confirmed = confirm_and_show_password(e)
     pause unless confirmed   # si falló, pausa para que se lea el error
   end
 
+
+  # ── Opción 2: Buscar y filtrar entradas ─────────────────────────
+  # Búsqueda parcial, sin distinción de mayúsculas, en servicio Y usuario.
+  # El prompt de búsqueda autocompleta por nombre de servicio (Tab).
+  # Los términos que coincidan aparecen resaltados en cian.
+  # Desde los resultados se puede ver el detalle de una entrada.
+  # Al final se ofrece repetir la búsqueda sin volver al menú.
 
   def cmd_search
     return empty_vault_notice if @entries.empty?
@@ -265,6 +356,8 @@ class PasswordManager
         pause
         return
       end
+
+      # Filtrar manteniendo el índice original de @entries
       results = @entries.each_with_index.select { |e, _i| entry_matches?(e, query) }
 
       clear_screen
@@ -277,6 +370,8 @@ class PasswordManager
         results_str = "#{results.size} #{pluralize(results.size, 'resultado', 'resultados')}"
         puts "  ── #{results_str} para \"#{query}\" (de #{total_str}) ──"
         print_search_table(results, query)
+
+        # Ofrecer ver detalle de uno de los resultados
         idx = prompt_result_index(results)
         if idx
           e   = @entries[idx]
@@ -299,6 +394,8 @@ class PasswordManager
   end
 
 
+  # ── Opción 3: Añadir entrada (manual o con contraseña generada) ─
+
   def cmd_add
     puts "  ── Añadir nueva entrada ────────────────────────────────"
 
@@ -317,6 +414,11 @@ class PasswordManager
   end
 
 
+  # ── Opción 4: Editar una entrada existente ──────────────────────
+  # Muestra los valores actuales entre corchetes.
+  # Pulsar Enter sin escribir nada conserva el valor original,
+  # lo que permite editar solo los campos que necesites.
+
   def cmd_edit
     return empty_vault_notice if @entries.empty?
 
@@ -329,29 +431,41 @@ class PasswordManager
     e = @entries[idx]
 
     puts "\n  Deja en blanco y pulsa Enter para conservar el valor actual.\n"
+
+    # ── Servicio ────────────────────────────────────────────────
     print "  Servicio    [#{e['service']}]: "
     input_svc = gets.chomp.strip
     new_svc   = input_svc.empty? ? e['service'] : input_svc
+
+    # ── Usuario ─────────────────────────────────────────────────
     print "  Usuario     [#{e['username']}]: "
     input_usr = gets.chomp.strip
     new_usr   = input_usr.empty? ? e['username'] : input_usr
-    puts "  Contraseña  [actual oculta — Enter para conservar | 'g' para generar nueva]:"
+
+    # ── Contraseña ──────────────────────────────────────────────
+    puts "  Contraseña  [actual oculta — Enter conserva | 'g' generador personalizable]:"
     print "  > "
     input_pwd = gets.chomp.strip
 
     new_pwd = case input_pwd
               when ''
+                # Conservar la contraseña actual sin mostrarla
                 e['password']
               when 'g', 'G'
-                length    = prompt_length
-                generated = PasswordGenerator.generate(length)
-                puts "  Contraseña generada: \e[1;33m#{generated}\e[0m"
-                generated
+                # Abrir el generador personalizable
+                puts
+                result = prompt_generate_custom
+                return unless result
+                result
               else
+                # Contraseña escrita a mano: validar fortaleza
+                # show_password_strength devuelve la contraseña a usar o nil si canceló
                 result = show_password_strength(input_pwd)
                 return unless result
                 result
               end
+
+    # ── Confirmar cambios ───────────────────────────────────────
     puts
     puts "  ── Resumen de cambios ──────────────────────────────────"
     puts "  Servicio  : #{e['service']}  →  #{new_svc}"   if new_svc != e['service']
@@ -373,7 +487,11 @@ class PasswordManager
       pause
       return
     end
+
+    # Guardar contraseña anterior en el historial si cambió
     add_to_history(@entries[idx], e['password']) if new_pwd != e['password']
+
+    # Aplicar los cambios y persistir
     @entries[idx]['service']  = new_svc
     @entries[idx]['username'] = new_usr
     @entries[idx]['password'] = new_pwd
@@ -385,6 +503,8 @@ class PasswordManager
     pause
   end
 
+
+  # ── Opción 5: Eliminar una entrada por índice ───────────────────
 
   def cmd_delete
     return empty_vault_notice if @entries.empty?
@@ -412,6 +532,8 @@ class PasswordManager
     pause
   end
 
+
+  # ── Opción 6: Cambiar contraseña maestra ────────────────────────
 
   def cmd_change_master
     puts "  ── Cambiar contraseña maestra ──────────────────────────"
@@ -449,6 +571,10 @@ class PasswordManager
   end
 
 
+  # ── Opción 7: Ver registro de auditoría ─────────────────────────
+  # Muestra los últimos eventos del registro en una tabla.
+  # Incluye: fecha/hora, tipo de acción y servicio afectado.
+
   def cmd_audit
     puts "  ── Registro de auditoría ───────────────────────────────"
 
@@ -462,6 +588,7 @@ class PasswordManager
     total = @audit_log.size
     shown = @audit_log.last(page)
     sep   = '─' * 68
+
     puts "\n  #{sep}"
     puts "  #{"Fecha y hora".ljust(21)} #{"Acción".ljust(24)} Servicio"
     puts "  #{sep}"
@@ -469,7 +596,7 @@ class PasswordManager
     shown.each do |event|
       time    = format_audit_time(event['timestamp'])
       action  = translate_action(event['action']).ljust(24)
-      detail  = truncate(event['detail'] || '—', 20)
+      detail  = truncate(strip_ansi(event['detail'] || '—'), 20)
       puts "  #{time.ljust(21)} #{action} #{detail}"
     end
 
@@ -479,6 +606,11 @@ class PasswordManager
     pause
   end
 
+
+  # ── Opción 8: Historial de contraseñas ─────────────────────────
+  # Muestra las contraseñas anteriores de una entrada (hasta MAX_HISTORY).
+  # Requiere contraseña maestra para ver cada contraseña histórica.
+  # Permite restaurar una contraseña anterior como contraseña actual.
 
   def cmd_history
     return empty_vault_notice if @entries.empty?
@@ -498,6 +630,8 @@ class PasswordManager
       pause
       return
     end
+
+    # ── Tabla de historial ──────────────────────────────────────
     sep = '─' * 55
     puts "\n  #{e['service']}  ·  #{history.size} cambio(s) anteriores:"
     puts "\n  #{sep}"
@@ -508,6 +642,8 @@ class PasswordManager
       puts "  #{i.to_s.ljust(5)} #{date.ljust(22)} ••••••••"
     end
     puts "  #{sep}\n"
+
+    # ── Seleccionar entrada a ver ───────────────────────────────
     print "\n  N° para ver una contraseña histórica (Enter para omitir): "
     input = gets.chomp.strip
     return pause if input.empty?
@@ -517,9 +653,12 @@ class PasswordManager
       pause
       return
     end
+
     hist_idx = input.to_i
     h        = history[hist_idx]
     date_str = format_audit_time(h['changed_at'])
+
+    # Entry temporal: el campo Servicio incluye la fecha como contexto
     temp = {
       'service'  => "#{e['service']}  \e[90m(historial · #{date_str})\e[0m",
       'username' => e['username'],
@@ -527,9 +666,15 @@ class PasswordManager
     }
     confirmed = confirm_and_show_password(temp)
     return unless confirmed
+
+    # ── Ofrecer restaurar ──────────────────────────────────────
     puts "  Servicio : #{e['service']}"
     print "  ¿Restaurar la contraseña del #{date_str} como contraseña actual? (s/N): "
     return unless gets.chomp.strip.downcase == 's'
+
+    # 1. Eliminar la entrada seleccionada del historial
+    # 2. Añadir la contraseña actual al historial
+    # 3. Establecer la contraseña restaurada como actual
     @entries[idx]['history'].delete_at(hist_idx)
     add_to_history(@entries[idx], e['password'])
     @entries[idx]['password'] = h['password']
@@ -541,6 +686,8 @@ class PasswordManager
   end
 
 
+  # ── Opción 0: Salir del programa ────────────────────────────────
+
   def cmd_exit
     @master_password&.replace("\x00" * @master_password.bytesize)
     puts "\n  ⚪  ¡Hasta pronto! Tu almacén está protegido."
@@ -548,13 +695,25 @@ class PasswordManager
   end
 
 
+  # ── Autocierre por inactividad ───────────────────────────────────
+  # Se activa cuando el usuario no escribe nada en el menú principal
+  # durante INACTIVITY_TIMEOUT segundos.
+  # Pasos: limpia datos sensibles → muestra pantalla de bloqueo →
+  #        pide contraseña → re-descifra almacén → reanuda sesión.
+
   def lock_session!
+    # 1. Registrar el bloqueo ANTES de limpiar la contraseña
     log_event('session_lock')
+
+    # 2. Limpiar la contraseña maestra y las entradas de la memoria
     @master_password&.replace("\x00" * @master_password.bytesize)
     @master_password = nil
     @entries = []
+
     clear_screen
     show_lock_banner
+
+    # 3. Pedir contraseña hasta acertar
     loop do
       password = prompt_secret("Contraseña maestra para desbloquear")
 
@@ -583,6 +742,8 @@ class PasswordManager
   end
 
 
+  # ── Helpers de entrada de usuario ───────────────────────────────
+
   def prompt_secret(label)
     print "\n  #{label}: "
     secret = if $stdin.respond_to?(:noecho)
@@ -596,26 +757,48 @@ class PasswordManager
     $stdin.gets.to_s.chomp
   end
 
+  # Prompt interactivo con autocompletado en tiempo real.
+  #
+  # Mientras el usuario escribe, filtra 'candidates' por prefijo y
+  # muestra hasta 6 coincidencias debajo del cursor (en gris).
+  # La coincidencia seleccionada aparece resaltada en verde [entre corchetes].
+  #
+  #   Tab        → ciclar por las sugerencias
+  #   Enter      → confirmar lo escrito (o la sugerencia seleccionada)
+  #   Backspace  → borrar el último carácter
+  #   Esc        → cancelar y devolver nil
+  #
+  # Si el terminal no soporta getch, cae a un prompt simple sin color.
+  # Devuelve el texto introducido, o nil si el usuario pulsó Esc.
   def prompt_with_autocomplete(label, candidates)
     unless $stdin.respond_to?(:getch)
       print "\n  #{label}: "
       input = $stdin.gets.to_s.chomp.strip
       return input.empty? ? nil : input
     end
+
     buffer  = ''
     tab_idx = -1
     drawn   = false
+
     loop do
+      # Coincidencias por prefijo, sin distinción de mayúsculas, máx. 6
       matches = buffer.empty? ? [] : candidates
         .select  { |c| c.downcase.start_with?(buffer.downcase) }
         .sort_by { |c| c.downcase }
         .first(6)
+
+      # Borrar el área dibujada anteriormente (línea input + línea sugerencias)
       if drawn
-        print "\r\e[2K"
-        print "\e[1A\r\e[2K"
+        print "\r\e[2K"       # limpiar línea de sugerencias (línea actual)
+        print "\e[1A\r\e[2K"  # subir y limpiar línea de input
       end
       drawn = true
+
+      # ── Línea 1: prompt + texto actual ──────────────────────────
       print "  #{label}: #{buffer}"
+
+      # ── Línea 2: sugerencias ────────────────────────────────────
       print "\n"
       if matches.any?
         parts = matches.each_with_index.map do |m, i|
@@ -628,13 +811,15 @@ class PasswordManager
         print "  \e[90m↳ sin coincidencias\e[0m"
       end
       $stdout.flush
+
       char = begin
         $stdin.getch
       rescue StandardError
         return nil
       end
+
       case char
-      when "\r", "\n"
+      when "\r", "\n"          # Enter: confirmar
         print "\r\e[2K"
         print "\e[1A\r\e[2K"
         print "  #{label}: #{buffer}\n"
@@ -660,9 +845,12 @@ class PasswordManager
         print "\r\e[2K"
         print "\e[1A\r\e[2K\n"
         return nil
-      when /[\x20-\x7e]/
+
+      when /[\x20-\x7e]/       # ASCII imprimible
         buffer  += char
         tab_idx  = -1
+        # Nota: caracteres UTF-8 multi-byte (é, ñ…) llegan en varios
+        # bytes; se ignoran para no corromper el buffer.
       end
     end
   end
@@ -678,15 +866,69 @@ class PasswordManager
   end
 
   def prompt_password_or_generate
-    print "  Contraseña [Enter para generar automáticamente]: "
+    print "  Contraseña [Enter para generador personalizable]: "
     value = gets.chomp.strip
+
     unless value.empty?
+      # Contraseña escrita a mano: validar fortaleza
       return show_password_strength(value)
     end
-    length   = prompt_length
-    password = PasswordGenerator.generate(length)
-    puts "    Contraseña generada: \e[1;33m#{password}\e[0m"
-    password
+
+    # Enter vacío → abrir el generador personalizable
+    puts
+    prompt_generate_custom
+  end
+
+  # Muestra el generador personalizable: el usuario elige longitud,
+  # conjuntos de caracteres y puede regenerar hasta quedar conforme.
+  # Devuelve la contraseña elegida o nil si cancela con 'q'.
+  def prompt_generate_custom
+    puts "  ── Generador personalizable ────────────────────────────"
+    puts "  Enter sin texto acepta el valor por defecto entre [corchetes].\n"
+
+    length  = prompt_length
+    puts
+    upper   = prompt_yes_no("  Mayúsculas  A–Z  ", default: true)
+    lower   = prompt_yes_no("  Minúsculas  a–z  ", default: true)
+    digits  = prompt_yes_no("  Dígitos     0–9  ", default: true)
+    symbols = prompt_yes_no("  Símbolos    !@#$…", default: true)
+
+    unless upper || lower || digits || symbols
+      err "Selecciona al menos un tipo de carácter."
+      pause
+      return nil
+    end
+
+    opts = { uppercase: upper, lowercase: lower,
+             digits: digits, symbols: symbols }
+
+    loop do
+      begin
+        password = PasswordGenerator.generate(length, opts)
+      rescue ArgumentError => e
+        err e.message
+        pause
+        return nil
+      end
+
+      puts "\n  Contraseña generada: \e[1;33m#{password}\e[0m"
+      print "  Enter para aceptar  ·  r para regenerar  ·  q para cancelar: "
+
+      case gets.chomp.strip.downcase
+      when 'r' then next       # regenerar con los mismos parámetros
+      when 'q' then return nil # cancelar
+      else          return password  # Enter u otro → aceptar
+      end
+    end
+  end
+
+  # Muestra un prompt booleano con el valor por defecto entre corchetes.
+  # Enter sin texto devuelve el valor por defecto.
+  def prompt_yes_no(label, default: true)
+    hint = default ? "[S/n]" : "[s/N]"
+    print "#{label}  #{hint}: "
+    input = gets.chomp.strip.downcase
+    input.empty? ? default : input == 's'
   end
 
   def prompt_length
@@ -725,6 +967,10 @@ class PasswordManager
     idx
   end
 
+  # ── Helpers de presentación ──────────────────────────────────────
+
+  # Prepende old_password al historial de la entrada y recorta
+  # a MAX_HISTORY entradas. Llamar ANTES de sobreescribir la contraseña.
   def add_to_history(entry, old_password)
     entry['history'] ||= []
     entry['history'].unshift({
@@ -734,6 +980,14 @@ class PasswordManager
     entry['history'] = entry['history'].first(MAX_HISTORY)
   end
 
+  # ── Validación de fortaleza ──────────────────────────────────────
+
+  # Evalúa cinco criterios de fortaleza y devuelve un hash con:
+  #   score  — puntuación 0-5
+  #   level  — texto ('Muy débil' … 'Muy fuerte')
+  #   bar    — barra visual ANSI de 10 bloques
+  #   color  — código ANSI del nivel
+  #   checks — {length:, uppercase:, lowercase:, digits:, symbols:}
   def evaluate_password_strength(pwd)
     checks = {
       length:    pwd.length >= 12,
@@ -757,26 +1011,42 @@ class PasswordManager
     }
   end
 
+  # Muestra la fortaleza de una contraseña con barra visual y criterios.
+  # Si score >= 3 retorna pwd directamente (sin interacción).
+  # Si score <= 2 ofrece tres opciones al usuario:
+  #   s → usar la contraseña débil tal cual
+  #   g → generar una contraseña segura automáticamente (retorna la generada)
+  #   n/Enter → cancelar (retorna nil)
+  # Retorna siempre una String (la contraseña a usar) o nil si se canceló.
   def show_password_strength(pwd)
     s = evaluate_password_strength(pwd)
     puts
     puts "  Fortaleza : #{s[:bar]}  #{s[:color]}#{s[:level]}\e[0m  (#{s[:length]} caracteres)"
     puts "  Criterios : #{format_strength_checks(s[:checks])}"
     return pwd if s[:score] >= 3
+
     puts
     warn_msg "Contraseña débil."
-    print "  (s) usar esta  ·  (g) generar segura  ·  (n) cancelar: "
+    print "  (s) usar esta  ·  (g) generar segura  ·  (n / Enter) cancelar: "
+
     case gets.chomp.strip.downcase
     when 's'
-      pwd
+      pwd                                        # usar la contraseña débil
     when 'g'
       generated = PasswordGenerator.generate(DEFAULT_PWD_LEN)
       puts "  Contraseña generada: \e[1;33m#{generated}\e[0m"
-      generated
+      generated                                  # usar la contraseña generada
     else
-      nil
+      nil                                        # cancelar
     end
   end
+
+  # Elimina todos los códigos de escape ANSI (colores, estilos) de un string.
+  def strip_ansi(str)
+    str.to_s.gsub(/\e\[[0-9;]*m/, '')
+  end
+
+  # Formatea los cinco criterios como etiquetas coloreadas en una línea.
   def format_strength_checks(checks)
     { length: '≥12 chars', uppercase: 'mayúsculas',
       lowercase: 'minúsculas', digits: 'dígitos', symbols: 'símbolos' }
@@ -784,6 +1054,15 @@ class PasswordManager
       .join('  ')
   end
 
+  # Pide la contraseña maestra y, si coincide, muestra la contraseña
+  # de la entrada en pantalla. Protege contra accesos no autorizados
+  # cuando alguien se acerca a una terminal ya desbloqueada.
+  #
+  # Comportamiento:
+  #   · Hasta 3 intentos antes de denegar el acceso.
+  #   · En cada intento fallido muestra cuántos quedan.
+  #   · Si acierta: muestra la contraseña, espera Enter y limpia pantalla.
+  #   · Retorna true si se mostró la contraseña, false si se denegó.
   def confirm_and_show_password(entry)
     max_attempts = 3
 
@@ -815,9 +1094,12 @@ class PasswordManager
         err "Demasiados intentos fallidos. Acceso denegado."
       end
     end
+
     false
   end
 
+  # Ordena @entries alfabéticamente por nombre de servicio
+  # sin distinción de mayúsculas. Se llama al cargar, añadir y editar.
   def sort_entries!
     @entries.sort_by! { |e| e['service'].to_s.downcase }
   end
@@ -864,12 +1146,18 @@ class PasswordManager
     log_event('entry_add', service)
   end
 
+  # ── Helpers de búsqueda ──────────────────────────────────────────
+
+  # Devuelve true si la query aparece (parcial, sin mayúsculas)
+  # en el servicio O en el usuario de la entrada.
   def entry_matches?(entry, query)
     q = query.downcase
     entry['service'].to_s.downcase.include?(q) ||
       entry['username'].to_s.downcase.include?(q)
   end
 
+  # Envuelve la primera aparición de query en text con color cian+negrita.
+  # Devuelve el text sin cambios si no hay coincidencia.
   def highlight(text, query)
     idx = text.downcase.index(query.downcase)
     return text unless idx
@@ -879,6 +1167,8 @@ class PasswordManager
     "#{before}\e[1;36m#{match}\e[0m#{after}"
   end
 
+  # Muestra la tabla de resultados con los términos resaltados.
+  # results es un array de pares [entry, original_index].
   def print_search_table(results, query)
     sep = '─' * 60
     puts "\n  #{sep}"
@@ -892,6 +1182,8 @@ class PasswordManager
     puts "  #{sep}\n"
   end
 
+  # Pide al usuario el N° original de una entrada de la lista de resultados.
+  # Devuelve el índice si es válido, nil si el usuario pulsa Enter o el N° no existe.
   def prompt_result_index(results)
     valid = results.map { |_e, i| i }
     print "\n  Introduce el N° para ver detalle (Enter para omitir): "
@@ -946,24 +1238,27 @@ class PasswordManager
     system('clear') || system('cls')
   end
 
+  # Convierte un timestamp ISO 8601 a formato legible dd/mm/aaaa HH:MM:SS.
   def format_audit_time(iso_string)
     Time.iso8601(iso_string).strftime('%d/%m/%Y %H:%M:%S')
   rescue StandardError
     iso_string.to_s[0, 19]
   end
 
+  # Traduce la clave interna del evento a texto legible en español.
   def translate_action(action)
     {
-      'login_ok'             => '[OK] Inicio de sesion',
-      'session_lock'         => '[!!] Bloqueo automatico',
-      'session_unlock_ok'    => '[OK] Desbloqueo',
-      'session_unlock_fail'  => '[!!] Fallo desbloqueo',
-      'password_view'        => '[OK] Ver contrasena',
-      'password_view_fail'   => '[!!] Fallo ver contrasena',
-      'password_restore'     => '[~]  Contrasena restaurada',
-      'entry_add'            => '[+]  Nueva entrada',
-      'entry_edit'           => '[~]  Entrada editada',
-      'entry_delete'         => '[-]  Entrada eliminada',
+      'login_ok'               => '[OK] Inicio de sesion',
+      'session_lock'           => '[!!] Bloqueo automatico',
+      'session_unlock_ok'      => '[OK] Desbloqueo',
+      'session_unlock_fail'    => '[!!] Fallo desbloqueo',
+      'password_view'          => '[OK] Ver contrasena',
+      'password_view_fail'     => '[!!] Fallo ver contrasena',
+      'password_restore'       => '[~]  Contrasena restaurada',
+      'entry_add'              => '[+]  Nueva entrada',
+      'entry_edit'             => '[~]  Entrada editada',
+      'entry_delete'           => '[-]  Entrada eliminada',
+      'vault_tamper_detected'  => '[!!] MODIFICACION EXTERNA',
     }.fetch(action, action)
   end
 
@@ -982,6 +1277,7 @@ class PasswordManager
     BANNER
   end
 
+  # Pantalla que aparece cuando la sesión se bloquea por inactividad.
   def show_lock_banner
     sep      = '─' * 55
     time_str = format_timeout(INACTIVITY_TIMEOUT)
@@ -999,6 +1295,7 @@ class PasswordManager
     LOCK
   end
 
+  # Convierte segundos a texto legible, p.ej. 300 → "5 min".
   def format_timeout(seconds)
     mins = seconds / 60
     secs = seconds % 60
