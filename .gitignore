@@ -22,3 +22,5 @@ vault.json
 Gemfile.lock
 
 audit.log
+
+vault.json.sha256

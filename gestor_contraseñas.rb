@@ -1,11 +1,9 @@
-# encoding: utf-8
-# frozen_string_literal: true
-
 require 'securerandom'
 require 'openssl'
 require 'json'
 require 'io/console'
 require 'timeout'
+require 'time'
 
 module PasswordGenerator
   UPPERCASE = ('A'..'Z').to_a.freeze
@@ -1150,7 +1148,9 @@ class PasswordManager
 
   # Devuelve true si la query aparece (parcial, sin mayúsculas)
   # en el servicio O en el usuario de la entrada.
+  # Devuelve false para query vacío (toda string contiene "").
   def entry_matches?(entry, query)
+    return false if query.empty?
     q = query.downcase
     entry['service'].to_s.downcase.include?(q) ||
       entry['username'].to_s.downcase.include?(q)
@@ -1323,13 +1323,15 @@ class PasswordManager
   end
 end
 
-begin
-  PasswordManager.new.run
-rescue Interrupt
-  puts "\n\n  🟡   Programa interrumpido. ¡Hasta pronto!"
-  exit(0)
-rescue => e
-  puts "\n  🔴  Error inesperado: #{e.message}"
-  puts e.backtrace.first(5).map { |l| "     #{l}" }.join("\n") if $DEBUG
-  exit(1)
+if __FILE__ == $PROGRAM_NAME
+  begin
+    PasswordManager.new.run
+  rescue Interrupt
+    puts "\n\n  🟡   Programa interrumpido. ¡Hasta pronto!"
+    exit(0)
+  rescue => e
+    puts "\n  🔴  Error inesperado: #{e.message}"
+    puts e.backtrace.first(5).map { |l| "     #{l}" }.join("\n") if $DEBUG
+    exit(1)
+  end
 end
