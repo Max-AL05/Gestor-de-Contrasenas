@@ -1,3 +1,6 @@
+# encoding: utf-8
+# frozen_string_literal: true
+
 require 'securerandom'
 require 'openssl'
 require 'json'
@@ -289,17 +292,19 @@ class PasswordManager
   def dispatch(option)
     clear_screen
     case option
-    when '1' then cmd_browse
-    when '2' then cmd_search
-    when '3' then cmd_add
-    when '4' then cmd_edit
-    when '5' then cmd_delete
-    when '6' then cmd_change_master
-    when '7' then cmd_audit
-    when '8' then cmd_history
-    when '0' then cmd_exit
+    when '1'  then cmd_browse
+    when '2'  then cmd_search
+    when '3'  then cmd_add
+    when '4'  then cmd_edit
+    when '5'  then cmd_delete
+    when '6'  then cmd_change_master
+    when '7'  then cmd_audit
+    when '8'  then cmd_history
+    when '9'  then cmd_export_backup
+    when '10' then cmd_import_backup
+    when '0'  then cmd_exit
     else
-      err "Opción '#{option}' no válida. Elige entre 0 y 8."
+      err "Opción '#{option}' no válida. Elige entre 0 y 10."
     end
   end
 
@@ -684,6 +689,188 @@ class PasswordManager
   end
 
 
+  # ── Opción 9: Exportar backup cifrado ───────────────────────────
+  # Crea un archivo .bak con las entradas cifradas con la misma
+  # contraseña maestra. Portable entre máquinas y sistemas operativos.
+
+  def cmd_export_backup
+    puts "  ── Exportar backup cifrado ─────────────────────────────"
+    puts "  Crea un archivo .bak que puedes guardar en un USB,"
+    puts "  nube, disco externo, etc.\n"
+
+    default  = "vault_backup_#{Time.now.strftime('%Y-%m-%d')}.bak"
+    filename = prompt_with_default("Nombre del archivo", default)
+
+    if File.exist?(filename)
+      print "\n  El archivo '#{filename}' ya existe. ¿Sobreescribir? (s/N): "
+      unless gets.chomp.strip.downcase == 's'
+        info "Exportación cancelada."
+        pause
+        return
+      end
+    end
+
+    print "\n    Cifrando backup..."
+    $stdout.flush
+
+    encrypted = Crypto.encrypt(JSON.generate(@entries), @master_password)
+    backup    = {
+      'version'     => '1.0',
+      'program'     => 'gestor-contrasenas',
+      'created_at'  => Time.now.iso8601,
+      'entry_count' => @entries.size
+    }.merge(encrypted)
+
+    File.write(filename, JSON.pretty_generate(backup))
+    File.chmod(0o600, filename)
+    print "\r#{' ' * 25}\r"
+
+    log_event('backup_export', filename)
+
+    ok "Backup creado: #{filename}"
+    puts "  Entradas  : #{@entries.size}"
+    puts "  Tamaño    : #{File.size(filename)} bytes"
+    puts "  Cifrado   : AES-256-GCM (contraseña maestra actual)"
+    pause
+  rescue StandardError => e
+    print "\r#{' ' * 25}\r"
+    err "No se pudo crear el backup: #{e.message}"
+    pause
+  end
+
+
+  # ── Opción 10: Importar backup cifrado ──────────────────────────
+  # Lee un archivo .bak, lo descifra con la contraseña con la que
+  # fue creado y ofrece dos modos:
+  #   Reemplazar — sustituye todas las entradas actuales
+  #   Mezclar    — añade solo las entradas nuevas, omite duplicados
+
+  def cmd_import_backup
+    puts "  ── Importar backup cifrado ─────────────────────────────"
+    puts "  Restaura entradas desde un archivo .bak.\n"
+
+    print "\n  Ruta del archivo .bak: "
+    filename = gets.chomp.strip
+
+    if filename.empty?
+      info "Importación cancelada."
+      pause
+      return
+    end
+
+    unless File.exist?(filename)
+      err "Archivo no encontrado: '#{filename}'"
+      pause
+      return
+    end
+
+    # ── Leer y validar estructura ──────────────────────────────────
+    begin
+      backup = JSON.parse(File.read(filename))
+    rescue JSON::ParserError
+      err "El archivo no tiene un formato JSON válido."
+      pause
+      return
+    end
+
+    unless backup['program'] == 'gestor-contrasenas' && backup['version']
+      err "El archivo no es un backup de este programa."
+      pause
+      return
+    end
+
+    # ── Mostrar información del backup ────────────────────────────
+    created = format_audit_time(backup['created_at'])
+    puts "\n  Archivo   : #{filename}"
+    puts "  Creado    : #{created}"
+    puts "  Entradas  : #{backup['entry_count']}"
+    puts "  Versión   : #{backup['version']}\n"
+
+    # ── Descifrar ─────────────────────────────────────────────────
+    password = prompt_secret("Contraseña del backup")
+
+    print "\n    Descifrando..."
+    $stdout.flush
+
+    begin
+      imported = JSON.parse(Crypto.decrypt(backup, password))
+      print "\r#{' ' * 20}\r"
+    rescue OpenSSL::Cipher::CipherError
+      print "\r#{' ' * 20}\r"
+      err "Contraseña incorrecta o archivo corrupto."
+      pause
+      return
+    end
+
+    # ── Elegir modo de importación ────────────────────────────────
+    puts "\n  #{imported.size} entradas listas para importar.\n"
+    puts "  (r) Reemplazar todo el almacén actual"
+    puts "  (m) Mezclar  — añade nuevas, omite duplicados"
+    puts "  (n) Cancelar\n"
+    print "  Elige: "
+
+    case gets.chomp.strip.downcase
+    when 'r' then import_replace(imported)
+    when 'm' then import_merge(imported)
+    else
+      info "Importación cancelada."
+      pause
+    end
+  end
+
+
+  # ── Helpers internos de importación ─────────────────────────────
+
+  # Reemplaza TODAS las entradas actuales con las del backup.
+  def import_replace(imported)
+    print "\n  ¿Reemplazar todo el almacén? Esta acción es irreversible. (s/N): "
+    unless gets.chomp.strip.downcase == 's'
+      info "Importación cancelada."
+      pause
+      return
+    end
+    @entries = imported.map { |e| e.merge('history' => e['history'] || []) }
+    sort_entries!
+    save_vault
+    log_event('backup_import_replace')
+    ok "Almacén reemplazado. #{@entries.size} entradas importadas."
+    pause
+  end
+
+  # Mezcla el backup con el almacén actual.
+  # Duplicado = mismo servicio Y mismo usuario (sin distinción de mayúsculas).
+  # Las entradas duplicadas se conservan tal como están en el almacén actual.
+  def import_merge(imported)
+    added   = []
+    skipped = []
+
+    imported.each do |imp|
+      dup = @entries.any? do |e|
+        e['service'].to_s.downcase  == imp['service'].to_s.downcase &&
+        e['username'].to_s.downcase == imp['username'].to_s.downcase
+      end
+
+      if dup
+        skipped << imp['service']
+      else
+        @entries << imp.merge('history' => imp['history'] || [])
+        added    << imp['service']
+      end
+    end
+
+    sort_entries!
+    save_vault
+    log_event('backup_import_merge')
+
+    puts
+    added.each   { |s| puts "  \e[32m+\e[0m #{s}" }
+    skipped.each { |s| puts "  \e[90m↔ #{s}  (ya existe, omitida)\e[0m" }
+    puts
+    ok "Mezcla completada: #{added.size} añadida(s), #{skipped.size} omitida(s)."
+    pause
+  end
+
+
   # ── Opción 0: Salir del programa ────────────────────────────────
 
   def cmd_exit
@@ -861,6 +1048,14 @@ class PasswordManager
       return nil
     end
     value
+  end
+
+  # Muestra un prompt con un valor por defecto entre corchetes.
+  # Si el usuario pulsa Enter sin escribir nada, devuelve el default.
+  def prompt_with_default(label, default)
+    print "  #{label} [#{default}]: "
+    input = gets.chomp.strip
+    input.empty? ? default : input
   end
 
   def prompt_password_or_generate
@@ -1259,6 +1454,9 @@ class PasswordManager
       'entry_edit'             => '[~]  Entrada editada',
       'entry_delete'           => '[-]  Entrada eliminada',
       'vault_tamper_detected'  => '[!!] MODIFICACION EXTERNA',
+      'backup_export'          => '[+]  Backup exportado',
+      'backup_import_replace'  => '[~]  Backup importado (reemplazo)',
+      'backup_import_merge'    => '[~]  Backup importado (mezcla)',
     }.fetch(action, action)
   end
 
@@ -1308,15 +1506,17 @@ class PasswordManager
       ┌─────────────────────────────────────────────────┐
       │                MENÚ PRINCIPAL                   │
       ├─────────────────────────────────────────────────┤
-      │  1. Ver entradas                                │
-      │  2. Buscar entradas                             │
-      │  3. Añadir entrada                              │
-      │  4. Editar entrada                              │
-      │  5. Eliminar entrada                            │
-      │  6. Cambiar contraseña maestra                  │
-      │  7. Ver registro de auditoría                   │
-      │  8. Historial de contraseñas                    │
-      │  0. Salir                                       │
+      │   1. Ver entradas                               │
+      │   2. Buscar entradas                            │
+      │   3. Añadir entrada                             │
+      │   4. Editar entrada                             │
+      │   5. Eliminar entrada                           │
+      │   6. Cambiar contraseña maestra                 │
+      │   7. Ver registro de auditoría                  │
+      │   8. Historial de contraseñas                   │
+      │   9. Exportar backup                            │
+      │  10. Importar backup                            │
+      │   0. Salir                                      │
       └─────────────────────────────────────────────────┘
     MENU
     print "  Elige una opción: "

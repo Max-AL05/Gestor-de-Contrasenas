@@ -12,7 +12,7 @@
 require 'minitest/autorun'
 require 'fileutils'
 require 'tmpdir'
-require_relative 'gestor_contraseñas'
+require_relative 'gestor_contrasenas'
 
 # ════════════════════════════════════════════════════════════════════
 # Base común para los tests que necesitan una instancia de la clase
