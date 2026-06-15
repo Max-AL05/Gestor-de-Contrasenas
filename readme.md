@@ -1,10 +1,10 @@
-# 🔐 Gestor de Contraseñas Seguro
+# Gestor de Contraseñas Seguro
 
 Gestor de contraseñas de línea de comandos escrito en Ruby puro, sin dependencias externas. Cifra tu almacén con **AES-256-GCM** y deriva la clave maestra con **PBKDF2-HMAC-SHA256** (100 000 iteraciones).
 
 ---
 
-## ✨ Características
+## Características
 
 | Categoría | Funcionalidad |
 |---|---|
@@ -18,7 +18,7 @@ Gestor de contraseñas de línea de comandos escrito en Ruby puro, sin dependenc
 
 ---
 
-## 📋 Requisitos
+## Requisitos
 
 - **Ruby** >= 3.0
 - Solo librerías estándar: `openssl`, `json`, `io/console`, `securerandom`, `time`
@@ -27,7 +27,7 @@ Sin gemas, sin bundler, sin dependencias externas.
 
 ---
 
-## 🚀 Instalación y uso
+## Instalación y uso
 
 ```bash
 # Clonar el repositorio
@@ -42,7 +42,7 @@ La primera vez que lo ejecutes, se te pedirá que elijas una **contraseña maest
 
 ---
 
-## 🗂️ Archivos del proyecto
+## Archivos del proyecto
 
 ```
 gestor-contrasenas/
@@ -56,7 +56,7 @@ gestor-contrasenas/
 
 ---
 
-## 🔑 Menú principal
+## Menú principal
 
 ```
 ┌─────────────────────────────────────────────────┐
@@ -78,7 +78,7 @@ gestor-contrasenas/
 
 ---
 
-## 🔒 Seguridad
+## Seguridad
 
 ### Cifrado
 
@@ -114,7 +114,7 @@ Ver una contraseña almacenada requiere introducir la contraseña maestra. Con 3
 
 ---
 
-## 🛡️ Generador de contraseñas
+## Generador de contraseñas
 
 El generador usa `SecureRandom` (aleatoriedad criptográfica) y permite personalizar:
 
@@ -141,7 +141,7 @@ Si la contraseña es débil, ofrece tres opciones:
 
 ---
 
-## 🔍 Búsqueda con autocompletado
+## Búsqueda con autocompletado
 
 La opción **Buscar** incluye autocompletado en tiempo real mientras escribes:
 
@@ -158,7 +158,7 @@ La búsqueda cubre tanto el nombre del servicio como el usuario, con resaltado e
 
 ---
 
-## 📊 Registro de auditoría
+## Registro de auditoría
 
 Cada acción queda registrada con fecha, hora y servicio afectado:
 
@@ -176,7 +176,7 @@ Los eventos se purgan automáticamente cada **15 días**.
 
 ---
 
-## 💾 Backup y migración
+## Backup y migración
 
 **Exportar** (opción 9): crea un archivo `.bak` cifrado con AES-256-GCM.
 
@@ -195,7 +195,7 @@ ruby gestor_contrasenas.rb → opción 10 → mezclar
 
 ---
 
-## 🧪 Tests unitarios
+## Tests unitarios
 
 ```bash
 # Ejecutar todos los tests
@@ -223,7 +223,7 @@ ruby test_password_manager.rb --name TestCrypto
 
 ---
 
-## ⚙️ Configuración
+## Configuración
 
 Ajusta estas constantes al inicio de la clase `PasswordManager`:
 
@@ -236,7 +236,7 @@ MIN_MASTER_LEN       = 8        # Longitud mínima de la contraseña maestra
 
 ---
 
-## 📁 .gitignore recomendado
+## .gitignore recomendado
 
 ```gitignore
 # Almacén cifrado — NUNCA subir a GitHub
@@ -263,7 +263,7 @@ Thumbs.db
 
 ---
 
-## 🗓️ Roadmap
+## Roadmap
 
 - [x] Cifrado AES-256-GCM con PBKDF2
 - [x] Generador de contraseñas personalizable
@@ -283,7 +283,7 @@ Thumbs.db
 
 ---
 
-## 📄 Licencia
+## Licencia
 
 MIT License — consulta el archivo [LICENSE](LICENSE) para más información.
 
